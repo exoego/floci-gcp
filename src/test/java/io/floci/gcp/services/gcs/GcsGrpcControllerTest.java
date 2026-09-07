@@ -449,6 +449,65 @@ class GcsGrpcControllerTest {
                 Attempting to set: 2025-01-01T00:00:00+00:00.""", status.getDescription());
     }
 
+    /**
+     * GCS keeps custom_time as int64 nanoseconds. A seconds value it cannot multiply is rejected
+     * as "too large" (INVALID_ARGUMENT on write, INTERNAL on update), a Timestamp that breaks the
+     * protobuf rules is an internal error, and values inside the range saturate at the limits.
+     */
+    @Test
+    void malformedCustomTimeIsRejectedOrSaturatedLikeGcs() {
+        createBucket("grpc-custom-time-range-bucket");
+        String tooLarge = "Invalid timestamp - too large to convert to nanoseconds.";
+        String internal = "We encountered an internal error. Please try again.";
+
+        Status tooLargeWrite = Status.fromThrowable(writeWithCustomTime("too-large", 9_223_372_037L, 0).error);
+        assertEquals(Status.Code.INVALID_ARGUMENT, tooLargeWrite.getCode());
+        assertEquals(tooLarge, tooLargeWrite.getDescription());
+
+        Status badNanos = Status.fromThrowable(writeWithCustomTime("bad-nanos", 0, 1_000_000_000).error);
+        assertEquals(Status.Code.INTERNAL, badNanos.getCode());
+        assertEquals(internal, badNanos.getDescription());
+
+        Status beforeYearOne = Status.fromThrowable(writeWithCustomTime("year-zero", -62_135_596_801L, 0).error);
+        assertEquals(Status.Code.INTERNAL, beforeYearOne.getCode());
+        assertEquals(internal, beforeYearOne.getDescription());
+
+        RecordingObserver<WriteObjectResponse> saturatedHigh = writeWithCustomTime("high", 9_223_372_036L, 999_999_999);
+        assertNull(saturatedHigh.error);
+        assertEquals(timestamp("2262-04-11T23:47:16.854775807Z"), saturatedHigh.single().getResource().getCustomTime());
+
+        RecordingObserver<WriteObjectResponse> saturatedLow = writeWithCustomTime("low", -62_135_596_800L, 0);
+        assertNull(saturatedLow.error);
+        assertEquals(timestamp("1677-09-21T00:12:43.145224192Z"), saturatedLow.single().getResource().getCustomTime());
+
+        RecordingObserver<com.google.storage.v2.Object> tooLargeUpdate = updateObject("grpc-custom-time-range-bucket",
+                object("grpc-custom-time-range-bucket", "low").toBuilder()
+                        .setCustomTime(Timestamp.newBuilder().setSeconds(9_223_372_037L)),
+                "custom_time");
+        Status updateStatus = Status.fromThrowable(tooLargeUpdate.error);
+        assertEquals(Status.Code.INTERNAL, updateStatus.getCode());
+        assertEquals(tooLarge, updateStatus.getDescription());
+        assertEquals("1677-09-21T00:12:43.145224192Z",
+                service.getObjectMeta("grpc-custom-time-range-bucket", "low").getCustomTime());
+    }
+
+    private RecordingObserver<WriteObjectResponse> writeWithCustomTime(String name, long seconds, int nanos) {
+        byte[] payload = {1};
+        RecordingObserver<WriteObjectResponse> written = new RecordingObserver<>();
+        StreamObserver<WriteObjectRequest> stream = controller.writeObject(written);
+        stream.onNext(WriteObjectRequest.newBuilder()
+                .setWriteObjectSpec(WriteObjectSpec.newBuilder()
+                        .setResource(object("grpc-custom-time-range-bucket", name).toBuilder()
+                                .setCustomTime(Timestamp.newBuilder().setSeconds(seconds).setNanos(nanos)))
+                        .setObjectSize(payload.length))
+                .setWriteOffset(0)
+                .setChecksummedData(data(payload))
+                .setFinishWrite(true)
+                .build());
+        stream.onCompleted();
+        return written;
+    }
+
     /** An empty cache_control under the mask unsets the field, so REST omits it afterwards. */
     @Test
     void objectUpdateWithAnEmptyCacheControlUnsetsIt() {

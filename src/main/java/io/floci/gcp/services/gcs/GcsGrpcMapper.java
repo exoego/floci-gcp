@@ -159,7 +159,7 @@ final class GcsGrpcMapper {
         meta.setContentEncoding(blankToNull(value.getContentEncoding()));
         meta.setContentLanguage(blankToNull(value.getContentLanguage()));
         meta.setCacheControl(blankToNull(value.getCacheControl()));
-        meta.setCustomTime(value.hasCustomTime() ? rfc3339(value.getCustomTime()) : null);
+        meta.setCustomTime(value.hasCustomTime() ? GcsCustomTime.fromWrite(value.getCustomTime()) : null);
         meta.setTemporaryHold(value.getTemporaryHold());
         meta.setEventBasedHold(value.hasEventBasedHold() ? value.getEventBasedHold() : null);
         if (value.getMetadataCount() > 0) {
@@ -186,7 +186,7 @@ final class GcsGrpcMapper {
                 // GCS never removes a custom time. An unset custom_time under the mask is a no-op.
                 case "custom_time" -> {
                     if (value.hasCustomTime()) {
-                        patch.put("customTime", rfc3339(value.getCustomTime()));
+                        patch.put("customTime", GcsCustomTime.fromUpdate(value.getCustomTime()));
                     }
                 }
                 case "metadata" -> patch.put("metadata", new LinkedHashMap<>(value.getMetadataMap()));
@@ -230,10 +230,6 @@ final class GcsGrpcMapper {
 
     private static long parseLong(String value) {
         return value == null || value.isBlank() ? 0 : Long.parseLong(value);
-    }
-
-    private static String rfc3339(Timestamp value) {
-        return Instant.ofEpochSecond(value.getSeconds(), value.getNanos()).toString();
     }
 
     private static String orEmpty(String value) {
