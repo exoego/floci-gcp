@@ -258,12 +258,12 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         }
         LOG.debugf("streamingPull modifyAckDeadline subscription=%s ackIds=%d",
                 sub, request.getModifyDeadlineAckIdsCount());
-        var ackIdsByDeadline = new LinkedHashMap<Integer, List<String>>();
+        Map<Integer, List<String>> ackIdsByDeadline = new LinkedHashMap<>();
         for (int i = 0; i < request.getModifyDeadlineAckIdsCount(); i++) {
             ackIdsByDeadline.computeIfAbsent(request.getModifyDeadlineSeconds(i), k -> new ArrayList<>())
                     .add(request.getModifyDeadlineAckIds(i));
         }
-        for (var entry : ackIdsByDeadline.entrySet()) {
+        for (Map.Entry<Integer, List<String>> entry : ackIdsByDeadline.entrySet()) {
             service.modifyAckDeadline(sub, entry.getValue(), entry.getKey());
         }
     }

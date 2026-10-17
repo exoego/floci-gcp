@@ -720,8 +720,7 @@ class PubSubTest {
                         .hasMessageContaining("The ack deadline must be between 0 and 600 seconds.");
             }
         } finally {
-            try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
-            try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+            deleteQuietly(subName, topicName);
         }
     }
 
@@ -760,8 +759,20 @@ class PubSubTest {
             assertThat(deliveries.get()).isEqualTo(2);
         } finally {
             subscriber.stopAsync().awaitTerminated(10, TimeUnit.SECONDS);
-            try { subscriptionAdminClient.deleteSubscription(subName); } catch (Exception ignored) {}
-            try { topicAdminClient.deleteTopic(topicName); } catch (Exception ignored) {}
+            deleteQuietly(subName, topicName);
+        }
+    }
+
+    private static void deleteQuietly(ProjectSubscriptionName subName, ProjectTopicName topicName) {
+        try {
+            subscriptionAdminClient.deleteSubscription(subName);
+        } catch (Exception ignored) {
+            // Cleanup after the assertions; the names are unique per run, so a leftover cannot affect another test.
+        }
+        try {
+            topicAdminClient.deleteTopic(topicName);
+        } catch (Exception ignored) {
+            // Same as above.
         }
     }
 

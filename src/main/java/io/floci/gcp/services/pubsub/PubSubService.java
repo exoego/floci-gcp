@@ -679,13 +679,15 @@ public class PubSubService {
     }
 
     private void nack(String subName, List<String> ackIds) {
-        var deliveredMap = delivered.get(subName);
-        if (deliveredMap == null) {
+        ConcurrentHashMap<String, StoredMessage> deliveredMap = delivered.get(subName);
+        ConcurrentLinkedDeque<StoredMessage> queue = queues.get(subName);
+        if (deliveredMap == null || queue == null) {
+            // Deleted or detached in the meantime: there is no live queue to return the messages to.
             return;
         }
-        var requeued = new ArrayList<StoredMessage>();
-        for (var ackId : ackIds) {
-            var msg = deliveredMap.remove(ackId);
+        List<StoredMessage> requeued = new ArrayList<>();
+        for (String ackId : ackIds) {
+            StoredMessage msg = deliveredMap.remove(ackId);
             if (msg != null) {
                 requeued.add(msg);
             }
@@ -694,7 +696,7 @@ public class PubSubService {
             return;
         }
         LOG.debugf("nack subscription=%s requeued=%d", subName, requeued.size());
-        requeueAtFront(queues.computeIfAbsent(subName, k -> new ConcurrentLinkedDeque<>()), requeued);
+        requeueAtFront(queue, requeued);
         notifyListeners(subName);
     }
 

@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import java.util.Base64;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anEmptyMap;
@@ -270,6 +271,90 @@ class PubSubRestIntegrationTest {
                 .body("error.status", equalTo("INVALID_ARGUMENT"))
                 .body("error.message", equalTo("Invalid ack deadline given (ack_deadline=601). "
                         + "The ack deadline must be between 0 and 600 seconds."));
+    }
+
+    @Test
+    void modifyAckDeadlineParsesTheDeadlineAsInt32LikeGcp() {
+        String project = "pubsub-rest-nack-types-it";
+        String base = "/v1/projects/" + project;
+
+        given()
+                .contentType("application/json")
+                .body("{}")
+                .when().put(base + "/topics/events")
+                .then()
+                .statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("{\"topic\": \"projects/" + project + "/topics/events\", \"ackDeadlineSeconds\": 60}")
+                .when().put(base + "/subscriptions/worker")
+                .then()
+                .statusCode(200);
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"messages\": [{\"data\": \"%s\"}]}".formatted(
+                        Base64.getEncoder().encodeToString("typed".getBytes())))
+                .when().post(base + "/topics/events:publish")
+                .then()
+                .statusCode(200);
+        String ackId = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"maxMessages\": 1}")
+                .when().post(base + "/subscriptions/worker:pull")
+                .then()
+                .statusCode(200)
+                .body("receivedMessages.size()", equalTo(1))
+                .extract().path("receivedMessages[0].ackId");
+
+        for (String literal : List.of("4294967296", "false", "\"abc\"", "10.5")) {
+            given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .body("{\"ackIds\": [\"" + ackId + "\"], \"ackDeadlineSeconds\": " + literal + "}")
+                    .when().post(base + "/subscriptions/worker:modifyAckDeadline")
+                    .then()
+                    .statusCode(400)
+                    .body("error.status", equalTo("INVALID_ARGUMENT"))
+                    .body("error.message", equalTo(
+                            "Invalid value at 'ack_deadline_seconds' (TYPE_INT32), " + literal));
+        }
+        for (String literal : List.of("\"10\"", "10.0")) {
+            given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .body("{\"ackIds\": [\"" + ackId + "\"], \"ackDeadlineSeconds\": " + literal + "}")
+                    .when().post(base + "/subscriptions/worker:modifyAckDeadline")
+                    .then()
+                    .statusCode(200)
+                    .body("$", anEmptyMap());
+        }
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"maxMessages\": 1}")
+                .when().post(base + "/subscriptions/worker:pull")
+                .then()
+                .statusCode(200)
+                .body("receivedMessages", empty());
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"ackIds\": [\"" + ackId + "\"]}")
+                .when().post(base + "/subscriptions/worker:modifyAckDeadline")
+                .then()
+                .statusCode(200)
+                .body("$", anEmptyMap());
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"maxMessages\": 1}")
+                .when().post(base + "/subscriptions/worker:pull")
+                .then()
+                .statusCode(200)
+                .body("receivedMessages.size()", equalTo(1));
     }
 
     @Test

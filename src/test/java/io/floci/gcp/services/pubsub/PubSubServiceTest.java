@@ -551,6 +551,20 @@ class PubSubServiceTest {
     }
 
     @Test
+    void modifyAckDeadlineAfterDetachDoesNotResurrectTheMessage() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("msg")).build()));
+        String ackId = service.pull("projects/p1/subscriptions/s1", 10).get(0).getAckId();
+        service.detachSubscription("projects/p1/subscriptions/s1");
+
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(ackId), 0);
+
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+    }
+
+    @Test
     void modifyAckDeadlineRejectsADeadlineOutsideZeroToSixHundredSeconds() {
         service.createTopic("projects/p1/topics/t1");
         service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
