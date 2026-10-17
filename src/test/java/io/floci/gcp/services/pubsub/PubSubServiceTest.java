@@ -489,13 +489,13 @@ class PubSubServiceTest {
         service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
         service.publish("projects/p1/topics/t1",
                 List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("msg")).build()));
-        var first = service.pull("projects/p1/subscriptions/s1", 10);
+        List<ReceivedMessage> first = service.pull("projects/p1/subscriptions/s1", 10);
         assertEquals(1, first.size());
         assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
 
         service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(first.get(0).getAckId()), 0);
 
-        var redelivered = service.pull("projects/p1/subscriptions/s1", 10);
+        List<ReceivedMessage> redelivered = service.pull("projects/p1/subscriptions/s1", 10);
         assertEquals(1, redelivered.size());
         assertEquals(first.get(0).getMessage().getMessageId(), redelivered.get(0).getMessage().getMessageId());
         assertNotEquals(first.get(0).getAckId(), redelivered.get(0).getAckId());
@@ -525,7 +525,7 @@ class PubSubServiceTest {
                 PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m1")).build(),
                 PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m2")).build(),
                 PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("m3")).build()));
-        var first = service.pull("projects/p1/subscriptions/s1", 2);
+        List<ReceivedMessage> first = service.pull("projects/p1/subscriptions/s1", 2);
         assertEquals(List.of("m1", "m2"), first.stream()
                 .map(m -> m.getMessage().getData().toStringUtf8()).toList());
 

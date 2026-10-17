@@ -1,6 +1,7 @@
 package io.floci.gcp.services.pubsub;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.Test;
 
 import java.util.Base64;
@@ -212,7 +213,7 @@ class PubSubRestIntegrationTest {
                 .then()
                 .statusCode(200);
 
-        var first = given()
+        JsonPath first = given()
                 .urlEncodingEnabled(false)
                 .contentType("application/json")
                 .body("{\"maxMessages\": 1}")

@@ -5,6 +5,7 @@ import com.google.protobuf.Empty;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.PubsubMessage;
+import com.google.pubsub.v1.ReceivedMessage;
 import com.google.pubsub.v1.SeekRequest;
 import com.google.pubsub.v1.SeekResponse;
 import com.google.pubsub.v1.StreamingPullRequest;
@@ -122,7 +123,7 @@ class PubSubSubscriberControllerTest {
         service.publish(topic, List.of(PubsubMessage.newBuilder()
                 .setData(ByteString.copyFromUtf8("hello"))
                 .build()));
-        var first = service.pull(subscription, 1);
+        List<ReceivedMessage> first = service.pull(subscription, 1);
         assertEquals(1, first.size());
         assertTrue(service.pull(subscription, 1).isEmpty());
 
@@ -135,7 +136,7 @@ class PubSubSubscriberControllerTest {
 
         assertNull(responseObserver.error.get());
         assertEquals(1, responseObserver.values.size());
-        var redelivered = service.pull(subscription, 1);
+        List<ReceivedMessage> redelivered = service.pull(subscription, 1);
         assertEquals(1, redelivered.size());
         assertEquals("hello", redelivered.get(0).getMessage().getData().toStringUtf8());
         assertEquals(first.get(0).getMessage().getMessageId(), redelivered.get(0).getMessage().getMessageId());
@@ -178,7 +179,7 @@ class PubSubSubscriberControllerTest {
                 .setData(ByteString.copyFromUtf8("retry me"))
                 .build()));
         assertTrue(responseObserver.awaitValues(1), "streaming pull should deliver the published message");
-        var first = responseObserver.values.get(0).getReceivedMessages(0);
+        ReceivedMessage first = responseObserver.values.get(0).getReceivedMessages(0);
 
         requestObserver.onNext(StreamingPullRequest.newBuilder()
                 .addModifyDeadlineAckIds(first.getAckId())
@@ -187,7 +188,7 @@ class PubSubSubscriberControllerTest {
 
         assertTrue(responseObserver.awaitValues(2), "a nack over the stream should redeliver the message");
         assertNull(responseObserver.error.get());
-        var redelivered = responseObserver.values.get(1);
+        StreamingPullResponse redelivered = responseObserver.values.get(1);
         assertEquals(1, redelivered.getReceivedMessagesCount());
         assertEquals(first.getMessage().getMessageId(), redelivered.getReceivedMessages(0).getMessage().getMessageId());
         assertNotEquals(first.getAckId(), redelivered.getReceivedMessages(0).getAckId());
