@@ -233,6 +233,16 @@ public class PubSubRestController {
         return Response.ok(Map.of()).build();
     }
 
+    @POST
+    @Path("/subscriptions/{subscription}:modifyAckDeadline")
+    public Response modifyAckDeadline(@PathParam("project") String project,
+                                      @PathParam("subscription") String subscriptionId,
+                                      Map<String, Object> body) {
+        service.modifyAckDeadline(subscriptionName(project, subscriptionId),
+                stringList(body, "ackIds"), intValue(body, "ackDeadlineSeconds"));
+        return Response.ok(Map.of()).build();
+    }
+
     // ── IAM policies (google.iam.v1.IAMPolicy mixin) ───────────────────────────
     // More-literal templates win over /topics/{topic} etc. during JAX-RS sorting,
     // the same mechanism the :publish and :pull routes rely on.
