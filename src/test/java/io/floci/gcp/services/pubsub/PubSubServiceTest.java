@@ -24,6 +24,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -1628,6 +1631,108 @@ class PubSubServiceTest {
         List<ReceivedMessage> messages = service.pull("projects/p1/subscriptions/s1", 10);
         assertEquals(1, messages.size());
         assertEquals("at", messages.get(0).getMessage().getData().toStringUtf8());
+    }
+
+    @Test
+    void seekDuringAPullStillDropsTheMessageThePullTookFromTheQueue() throws Exception {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("old")).build()));
+        CountDownLatch pullTookTheMessage = new CountDownLatch(1);
+        CountDownLatch releasePull = new CountDownLatch(1);
+        // pull reads the clock after taking the message from the queue and before leasing it.
+        clock.onNextRead(() -> {
+            pullTookTheMessage.countDown();
+            await(releasePull);
+        });
+        AtomicReference<Thread> seekThread = new AtomicReference<>();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            try {
+                Future<List<ReceivedMessage>> pull =
+                        executor.submit(() -> service.pull("projects/p1/subscriptions/s1", 10));
+                assertTrue(pullTookTheMessage.await(5, TimeUnit.SECONDS));
+                Future<?> seek = executor.submit(() -> {
+                    seekThread.set(Thread.currentThread());
+                    service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(60));
+                });
+                awaitSeekDoneOrBlocked(seekThread, seek);
+                releasePull.countDown();
+                assertEquals(1, pull.get(5, TimeUnit.SECONDS).size());
+                seek.get(5, TimeUnit.SECONDS);
+            } finally {
+                releasePull.countDown();
+            }
+        }
+
+        clock.advance(Duration.ofSeconds(10));
+        service.expireLeases();
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+    }
+
+    @Test
+    void seekWaitsForALeaseExpiryInProgressAndDropsWhatItRequeued() throws Exception {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("old")).build()));
+        service.pull("projects/p1/subscriptions/s1", 10);
+        clock.advance(Duration.ofSeconds(10));
+        CountDownLatch expiryStarted = new CountDownLatch(1);
+        CountDownLatch releaseExpiry = new CountDownLatch(1);
+        clock.onNextRead(() -> {
+            expiryStarted.countDown();
+            await(releaseExpiry);
+        });
+        AtomicReference<Thread> seekThread = new AtomicReference<>();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            try {
+                Future<?> expiry = executor.submit(service::expireLeases);
+                assertTrue(expiryStarted.await(5, TimeUnit.SECONDS));
+                Future<?> seek = executor.submit(() -> {
+                    seekThread.set(Thread.currentThread());
+                    service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(60));
+                });
+                awaitSeekDoneOrBlocked(seekThread, seek);
+                assertFalse(seek.isDone(), "seek ran while the expiry sweep was moving leases");
+                releaseExpiry.countDown();
+                expiry.get(5, TimeUnit.SECONDS);
+                seek.get(5, TimeUnit.SECONDS);
+            } finally {
+                releaseExpiry.countDown();
+            }
+        }
+
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+    }
+
+    private static void awaitSeekDoneOrBlocked(AtomicReference<Thread> seekThread, Future<?> seek) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!seek.isDone() && !isBlockedInSeek(seekThread.get())) {
+            assertTrue(System.nanoTime() < deadline, "seek neither finished nor waited for the lease lock");
+            Thread.onSpinWait();
+        }
+    }
+
+    private static boolean isBlockedInSeek(Thread thread) {
+        if (thread == null || thread.getState() != Thread.State.BLOCKED) {
+            return false;
+        }
+        StackTraceElement[] stack = thread.getStackTrace();
+        return stack.length > 0
+                && stack[0].getClassName().equals(PubSubService.class.getName())
+                && stack[0].getMethodName().equals("seek");
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
     }
 
     private static Timestamp secondsFromNow(long seconds) {

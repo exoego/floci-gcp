@@ -73,6 +73,8 @@ public class PubSubService {
     private final StorageBackend<String, StoredSnapshot> snapshotStore;
 
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<StoredMessage>> queues = new ConcurrentHashMap<>();
+    // Each lease map is also the lock for moving that subscription's messages between queue and leases,
+    // so a seek never misses a message in transit. It is the innermost lock, so never notify listeners under it.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Lease>> delivered = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CopyOnWriteArrayList<MessageListener>> listeners = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Predicate<Map<String, String>>> compiledFilters = new ConcurrentHashMap<>();
@@ -644,11 +646,15 @@ public class PubSubService {
         List<ReceivedMessage> result = new ArrayList<>();
         int count = 0;
         while (count < maxMessages) {
-            StoredMessage msg = queue.poll();
-            if (msg == null) break;
-
             String ackId = UUID.randomUUID().toString();
-            deliveredMap.put(ackId, new Lease(msg, clock.instant().plusSeconds(ackDeadlineSeconds)));
+            StoredMessage msg;
+            synchronized (deliveredMap) {
+                msg = queue.poll();
+                if (msg == null) {
+                    break;
+                }
+                deliveredMap.put(ackId, new Lease(msg, clock.instant().plusSeconds(ackDeadlineSeconds)));
+            }
 
             PubsubMessage.Builder msgBuilder = PubsubMessage.newBuilder()
                     .setMessageId(msg.getMessageId())
@@ -739,17 +745,19 @@ public class PubSubService {
             return false;
         }
         List<StoredMessage> requeued = new ArrayList<>();
-        for (String ackId : ackIds) {
-            Lease lease = deliveredMap.remove(ackId);
-            if (lease != null) {
-                requeued.add(lease.message());
+        synchronized (deliveredMap) {
+            for (String ackId : ackIds) {
+                Lease lease = deliveredMap.remove(ackId);
+                if (lease != null) {
+                    requeued.add(lease.message());
+                }
             }
+            requeueAtFront(queue, requeued);
         }
         if (requeued.isEmpty()) {
             return false;
         }
         LOG.debugf("nack subscription=%s requeued=%d", subName, requeued.size());
-        requeueAtFront(queue, requeued);
         return true;
     }
 
@@ -763,33 +771,35 @@ public class PubSubService {
     }
 
     void expireLeases() {
-        Instant now = clock.instant();
         for (Map.Entry<String, ConcurrentHashMap<String, Lease>> entry : delivered.entrySet()) {
-            if (requeueExpiredLeases(entry.getKey(), entry.getValue(), now)) {
+            if (requeueExpiredLeases(entry.getKey(), entry.getValue())) {
                 notifyListeners(entry.getKey());
             }
         }
     }
 
-    private boolean requeueExpiredLeases(String subName, ConcurrentHashMap<String, Lease> deliveredMap, Instant now) {
+    private boolean requeueExpiredLeases(String subName, ConcurrentHashMap<String, Lease> deliveredMap) {
         ConcurrentLinkedDeque<StoredMessage> queue = queues.get(subName);
         if (queue == null || delivered.get(subName) != deliveredMap) {
             // Deleted, detached or recreated since the sweep started: these messages belong to no live queue.
             return false;
         }
         List<StoredMessage> requeued = new ArrayList<>();
-        for (Map.Entry<String, Lease> entry : deliveredMap.entrySet()) {
-            Lease lease = entry.getValue();
-            // remove(key, value) loses to a concurrent ack, nack or extension of the same lease.
-            if (lease.isExpired(now) && deliveredMap.remove(entry.getKey(), lease)) {
-                requeued.add(lease.message());
+        synchronized (deliveredMap) {
+            Instant now = clock.instant();
+            for (Map.Entry<String, Lease> entry : deliveredMap.entrySet()) {
+                Lease lease = entry.getValue();
+                // remove(key, value) loses to a concurrent ack or extension of the same lease.
+                if (lease.isExpired(now) && deliveredMap.remove(entry.getKey(), lease)) {
+                    requeued.add(lease.message());
+                }
             }
+            requeueAtFront(queue, requeued);
         }
         if (requeued.isEmpty()) {
             return false;
         }
         LOG.debugf("lease expiry subscription=%s requeued=%d", subName, requeued.size());
-        requeueAtFront(queue, requeued);
         return true;
     }
 
@@ -891,10 +901,11 @@ public class PubSubService {
             }
             cutoff = Instant.ofEpochSecond(time.getSeconds(), time.getNanos());
         }
-        ConcurrentHashMap<String, Lease> deliveredMap = delivered.get(subscriptionName);
+        ConcurrentHashMap<String, Lease> deliveredMap =
+                delivered.computeIfAbsent(subscriptionName, k -> new ConcurrentHashMap<>());
         if (cutoff == null) {
             // Clear delivered to simulate seeking back to snapshot position
-            if (deliveredMap != null) {
+            synchronized (deliveredMap) {
                 deliveredMap.clear();
             }
             return;
@@ -904,8 +915,8 @@ public class PubSubService {
         ConcurrentLinkedDeque<StoredMessage> queue =
                 queues.computeIfAbsent(subscriptionName, k -> new ConcurrentLinkedDeque<>());
         Instant seekTime = cutoff;
-        queue.removeIf(msg -> isBefore(msg.getPublishTime(), seekTime));
-        if (deliveredMap != null) {
+        synchronized (deliveredMap) {
+            queue.removeIf(msg -> isBefore(msg.getPublishTime(), seekTime));
             List<StoredMessage> requeued = new ArrayList<>();
             for (String ackId : List.copyOf(deliveredMap.keySet())) {
                 Lease lease = deliveredMap.remove(ackId);
