@@ -763,6 +763,47 @@ class PubSubTest {
         }
     }
 
+    @Test
+    @Order(22)
+    void unackedMessageIsRedeliveredAfterTheAckDeadline() throws Exception {
+        String topicId = TestFixtures.uniqueName("expiry-topic");
+        String subId = TestFixtures.uniqueName("expiry-sub");
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, topicId);
+        ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT_ID, subId);
+
+        topicAdminClient.createTopic(topicName);
+        subscriptionAdminClient.createSubscription(
+                subName, topicName, PushConfig.getDefaultInstance(), 10);
+        try {
+            publishOne(topicName, "expire-me");
+
+            SubscriberStubSettings subscriberStubSettings = SubscriberStubSettings.newBuilder()
+                    .setTransportChannelProvider(channelProvider)
+                    .setCredentialsProvider(credentialsProvider)
+                    .build();
+            try (GrpcSubscriberStub subscriberStub = GrpcSubscriberStub.create(subscriberStubSettings)) {
+                PullRequest pullRequest = PullRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .setMaxMessages(1)
+                        .build();
+                PullResponse first = subscriberStub.pullCallable().call(pullRequest);
+                assertThat(first.getReceivedMessagesList()).hasSize(1);
+                ReceivedMessage received = first.getReceivedMessages(0);
+                assertThat(subscriberStub.pullCallable().call(pullRequest).getReceivedMessagesList()).isEmpty();
+
+                TimeUnit.SECONDS.sleep(12);
+
+                PullResponse redelivered = subscriberStub.pullCallable().call(pullRequest);
+                assertThat(redelivered.getReceivedMessagesList()).hasSize(1);
+                assertThat(redelivered.getReceivedMessages(0).getMessage().getMessageId())
+                        .isEqualTo(received.getMessage().getMessageId());
+                assertThat(redelivered.getReceivedMessages(0).getAckId()).isNotEqualTo(received.getAckId());
+            }
+        } finally {
+            deleteQuietly(subName, topicName);
+        }
+    }
+
     private static void deleteQuietly(ProjectSubscriptionName subName, ProjectTopicName topicName) {
         try {
             subscriptionAdminClient.deleteSubscription(subName);

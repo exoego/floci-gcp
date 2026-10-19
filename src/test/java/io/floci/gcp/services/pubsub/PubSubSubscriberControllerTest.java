@@ -22,6 +22,7 @@ import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -48,14 +49,17 @@ class PubSubSubscriberControllerTest {
 
     private PubSubService service;
     private PubSubSubscriberController controller;
+    private MutableClock clock;
 
     @BeforeEach
     void setUp() {
+        clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
         service = new PubSubService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                IamServices.inMemory());
+                IamServices.inMemory(),
+                clock);
         controller = new PubSubSubscriberController(service);
     }
 
@@ -430,6 +434,96 @@ class PubSubSubscriberControllerTest {
         assertTrue(service.pull(subscription, 10).isEmpty());
 
         requestObserver.onCompleted();
+    }
+
+    @Test
+    void streamingPullRedeliversOnTheStreamOnceTheStreamAckDeadlinePasses() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 60);
+
+        RecordingObserver<StreamingPullResponse> responseObserver = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requestObserver = controller.streamingPull(responseObserver);
+        requestObserver.onNext(StreamingPullRequest.newBuilder()
+                .setSubscription(subscription)
+                .setStreamAckDeadlineSeconds(10)
+                .build());
+        service.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("expire me"))
+                .build()));
+        assertTrue(responseObserver.awaitValues(1), "streaming pull should deliver the published message");
+        ReceivedMessage first = responseObserver.values.get(0).getReceivedMessages(0);
+
+        clock.advance(Duration.ofSeconds(9));
+        service.expireLeases();
+        assertFalse(responseObserver.awaitValues(2), "the message must stay leased until the stream deadline");
+
+        clock.advance(Duration.ofSeconds(1));
+        service.expireLeases();
+        assertTrue(responseObserver.awaitValues(2), "an expired lease should be redelivered on the stream");
+        assertNull(responseObserver.error.get());
+        ReceivedMessage redelivered = responseObserver.values.get(1).getReceivedMessages(0);
+        assertEquals(first.getMessage().getMessageId(), redelivered.getMessage().getMessageId());
+        assertNotEquals(first.getAckId(), redelivered.getAckId());
+
+        requestObserver.onCompleted();
+    }
+
+    @Test
+    void streamingPullAppliesAStreamAckDeadlineChangedOnALaterRequest() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 60);
+
+        RecordingObserver<StreamingPullResponse> responseObserver = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requestObserver = controller.streamingPull(responseObserver);
+        requestObserver.onNext(StreamingPullRequest.newBuilder()
+                .setSubscription(subscription)
+                .setStreamAckDeadlineSeconds(60)
+                .build());
+        requestObserver.onNext(StreamingPullRequest.newBuilder()
+                .setStreamAckDeadlineSeconds(10)
+                .build());
+        service.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("expire me"))
+                .build()));
+        assertTrue(responseObserver.awaitValues(1), "streaming pull should deliver the published message");
+
+        clock.advance(Duration.ofSeconds(10));
+        service.expireLeases();
+
+        assertTrue(responseObserver.awaitValues(2), "the updated stream deadline should apply");
+        requestObserver.onCompleted();
+    }
+
+    @Test
+    void streamingPullLeaseOutlivesTheStreamUntilItsDeadline() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+
+        RecordingObserver<StreamingPullResponse> responseObserver = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requestObserver = controller.streamingPull(responseObserver);
+        requestObserver.onNext(StreamingPullRequest.newBuilder()
+                .setSubscription(subscription)
+                .setStreamAckDeadlineSeconds(60)
+                .build());
+        service.publish(topic, List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("crashed consumer"))
+                .build()));
+        assertTrue(responseObserver.awaitValues(1), "streaming pull should deliver the published message");
+        requestObserver.onCompleted();
+
+        clock.advance(Duration.ofSeconds(59));
+        service.expireLeases();
+        assertTrue(service.pull(subscription, 10).isEmpty());
+
+        clock.advance(Duration.ofSeconds(1));
+        service.expireLeases();
+        assertEquals(1, service.pull(subscription, 10).size());
     }
 
     @Test

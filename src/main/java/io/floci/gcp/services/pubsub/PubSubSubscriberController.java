@@ -45,6 +45,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBase {
@@ -198,6 +199,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
     public StreamObserver<StreamingPullRequest> streamingPull(
             StreamObserver<StreamingPullResponse> responseObserver) {
         AtomicReference<String> subscriptionRef = new AtomicReference<>();
+        AtomicInteger streamAckDeadlineSeconds = new AtomicInteger();
         AtomicReference<Runnable> unregisterRef = new AtomicReference<>();
         AtomicReference<IamGrpcDeliveryAuthorization.Delivery> deliveryAuthorizationRef =
                 new AtomicReference<>();
@@ -208,6 +210,9 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             @Override
             public void onNext(StreamingPullRequest request) {
                 try {
+                    if (request.getStreamAckDeadlineSeconds() > 0) {
+                        streamAckDeadlineSeconds.set(request.getStreamAckDeadlineSeconds());
+                    }
                     if (!request.getSubscription().isEmpty()) {
                         String sub = request.getSubscription();
                         subscriptionRef.set(sub);
@@ -217,7 +222,8 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                                         sub,
                                         () -> deliverStreamingMessages(
                                                 sub, responseObserver, unregisterRef, closed, deliveryLock,
-                                                deliveryAuthorizationRef.get(), StreamingPullRequest.getDefaultInstance())));
+                                                deliveryAuthorizationRef.get(), StreamingPullRequest.getDefaultInstance(),
+                                                streamAckDeadlineSeconds.get())));
                         if (previous != null) {
                             previous.run();
                         }
@@ -228,7 +234,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                         return;
                     }
                     deliverStreamingMessages(sub, responseObserver, unregisterRef, closed, deliveryLock,
-                            deliveryAuthorizationRef.get(), request);
+                            deliveryAuthorizationRef.get(), request, streamAckDeadlineSeconds.get());
                 } catch (Exception e) {
                     LOG.warnf("streamingPull error: %s", e.getMessage());
                     failStreamingPull(responseObserver, unregisterRef, closed, deliveryLock, e);
@@ -275,7 +281,8 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             AtomicBoolean closed,
             Object deliveryLock,
             IamGrpcDeliveryAuthorization.Delivery deliveryAuthorization,
-            StreamingPullRequest request) {
+            StreamingPullRequest request,
+            int streamAckDeadlineSeconds) {
         AtomicBoolean requeued = new AtomicBoolean(false);
         try {
             Runnable delivery = () -> {
@@ -290,7 +297,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                     if (request.getModifyDeadlineAckIdsCount() > 0 || request.getModifyDeadlineSecondsCount() > 0) {
                         modifyStreamingAckDeadlines(sub, request, requeued);
                     }
-                    List<ReceivedMessage> messages = service.pull(sub, 1000);
+                    List<ReceivedMessage> messages = service.pull(sub, 1000, streamAckDeadlineSeconds);
                     if (!messages.isEmpty()) {
                         LOG.debugf("streamingPull deliver subscription=%s messages=%d", sub, messages.size());
                         responseObserver.onNext(StreamingPullResponse.newBuilder()
