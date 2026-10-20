@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -928,6 +929,44 @@ class PubSubServiceTest {
             assertEquals(attempt, received.getDeliveryAttempt());
             service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(received.getAckId()), 0);
         }
+    }
+
+    @Test
+    void deadLetterTopicDeletedBeforeForwardingRedeliversTheMessage() {
+        AtomicReference<String> deleteOnNextGet = new AtomicReference<>();
+        InMemoryStorage<String, StoredTopic> topicStore = new InMemoryStorage<>() {
+            @Override
+            public Optional<StoredTopic> get(String key) {
+                Optional<StoredTopic> topic = super.get(key);
+                if (key.equals(deleteOnNextGet.get())) {
+                    deleteOnNextGet.set(null);
+                    delete(key);
+                }
+                return topic;
+            }
+        };
+        service.shutdownExecutors();
+        service = new PubSubService(topicStore, subStore, new InMemoryStorage<>(), iamService, clock);
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 5);
+        publish("msg");
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            service.modifyAckDeadline("projects/p1/subscriptions/s1",
+                    List.of(pullOne("projects/p1/subscriptions/s1").getAckId()), 0);
+        }
+        ReceivedMessage last = pullOne("projects/p1/subscriptions/s1");
+        assertEquals(5, last.getDeliveryAttempt());
+
+        // The threshold check still sees the topic, and the publish after it does not.
+        deleteOnNextGet.set("projects/p1/topics/dlq");
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(last.getAckId()), 0);
+
+        assertNull(deleteOnNextGet.get());
+        assertTrue(topicStore.get("projects/p1/topics/dlq").isEmpty());
+        ReceivedMessage redelivered = pullOne("projects/p1/subscriptions/s1");
+        assertEquals("msg", redelivered.getMessage().getData().toStringUtf8());
+        assertEquals(6, redelivered.getDeliveryAttempt());
     }
 
     @Test
