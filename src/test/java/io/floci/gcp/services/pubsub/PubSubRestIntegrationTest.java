@@ -12,6 +12,7 @@ import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
@@ -272,6 +273,87 @@ class PubSubRestIntegrationTest {
                 .body("error.status", equalTo("INVALID_ARGUMENT"))
                 .body("error.message", equalTo("Invalid ack deadline given (ack_deadline=601). "
                         + "The ack deadline must be between 0 and 600 seconds."));
+    }
+
+    @Test
+    void pullReportsDeliveryAttemptsAndNacksMoveTheMessageToTheDeadLetterTopic() {
+        String project = "pubsub-rest-dlq-it";
+        String base = "/v1/projects/" + project;
+        for (String topic : List.of("events", "dead")) {
+            given()
+                    .contentType("application/json")
+                    .body("{}")
+                    .when().put(base + "/topics/" + topic)
+                    .then()
+                    .statusCode(200);
+        }
+        given()
+                .contentType("application/json")
+                .body("{\"topic\": \"projects/" + project + "/topics/dead\"}")
+                .when().put(base + "/subscriptions/dead-sub")
+                .then()
+                .statusCode(200);
+        given()
+                .contentType("application/json")
+                .body("{\"topic\": \"projects/" + project + "/topics/events\", \"ackDeadlineSeconds\": 60, "
+                        + "\"deadLetterPolicy\": {\"deadLetterTopic\": \"projects/" + project + "/topics/dead\"}}")
+                .when().put(base + "/subscriptions/worker")
+                .then()
+                .statusCode(200)
+                .body("deadLetterPolicy.maxDeliveryAttempts", equalTo(5));
+
+        String payload = Base64.getEncoder().encodeToString("poison".getBytes());
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"messages\": [{\"data\": \"%s\"}]}".formatted(payload))
+                .when().post(base + "/topics/events:publish")
+                .then()
+                .statusCode(200);
+
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            String ackId = given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .body("{\"maxMessages\": 1}")
+                    .when().post(base + "/subscriptions/worker:pull")
+                    .then()
+                    .statusCode(200)
+                    .body("receivedMessages.size()", equalTo(1))
+                    .body("receivedMessages[0].deliveryAttempt", equalTo(attempt))
+                    .extract().jsonPath().getString("receivedMessages[0].ackId");
+            given()
+                    .urlEncodingEnabled(false)
+                    .contentType("application/json")
+                    .body("{\"ackIds\": [\"" + ackId + "\"], \"ackDeadlineSeconds\": 0}")
+                    .when().post(base + "/subscriptions/worker:modifyAckDeadline")
+                    .then()
+                    .statusCode(200);
+        }
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"maxMessages\": 1}")
+                .when().post(base + "/subscriptions/worker:pull")
+                .then()
+                .statusCode(200)
+                .body("receivedMessages", empty());
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{\"maxMessages\": 1}")
+                .when().post(base + "/subscriptions/dead-sub:pull")
+                .then()
+                .statusCode(200)
+                .body("receivedMessages.size()", equalTo(1))
+                .body("receivedMessages[0]", not(hasKey("deliveryAttempt")))
+                .body("receivedMessages[0].message.data", equalTo(payload))
+                .body("receivedMessages[0].message.attributes.CloudPubSubDeadLetterSourceDeliveryCount", equalTo("5"))
+                .body("receivedMessages[0].message.attributes.CloudPubSubDeadLetterSourceSubscription",
+                        equalTo("worker"))
+                .body("receivedMessages[0].message.attributes.CloudPubSubDeadLetterSourceSubscriptionProject",
+                        equalTo(project));
     }
 
     @Test

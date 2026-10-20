@@ -3,6 +3,7 @@ package io.floci.gcp.services.pubsub;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import com.google.protobuf.Timestamp;
+import com.google.pubsub.v1.DeadLetterPolicy;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
@@ -27,7 +28,11 @@ import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -437,6 +442,93 @@ class PubSubSubscriberControllerTest {
     }
 
     @Test
+    void streamingPullReportsDeliveryAttemptsAndForwardsTheDeadLetterToAStream() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String deadLetterTopic = "projects/p1/topics/dlq";
+        String subscription = "projects/p1/subscriptions/s1";
+        String deadLetterSubscription = "projects/p1/subscriptions/dlq-sub";
+        service.createTopic(topic);
+        service.createTopic(deadLetterTopic);
+        service.createSubscription(deadLetterSubscription, deadLetterTopic, 60);
+        createDeadLetterSubscription(subscription, topic, deadLetterTopic);
+
+        RecordingObserver<StreamingPullResponse> deadLetters = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> deadLetterStream = controller.streamingPull(deadLetters);
+        deadLetterStream.onNext(StreamingPullRequest.newBuilder().setSubscription(deadLetterSubscription).build());
+        RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> stream = controller.streamingPull(responses);
+        stream.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription).build());
+        service.publish(topic, List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("msg")).build()));
+
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            assertTrue(responses.awaitValues(attempt), "delivery " + attempt + " should reach the stream");
+            ReceivedMessage received = responses.values.get(attempt - 1).getReceivedMessages(0);
+            assertEquals(attempt, received.getDeliveryAttempt());
+            stream.onNext(StreamingPullRequest.newBuilder()
+                    .addModifyDeadlineAckIds(received.getAckId())
+                    .addModifyDeadlineSeconds(0)
+                    .build());
+        }
+
+        assertTrue(deadLetters.awaitValue(), "the dead letter should reach the dead-letter stream");
+        assertEquals("5", deadLetters.values.get(0).getReceivedMessages(0).getMessage()
+                .getAttributesMap().get("CloudPubSubDeadLetterSourceDeliveryCount"));
+        assertFalse(responses.awaitValues(6), "a dead-lettered message must not come back on the source stream");
+        assertNull(responses.error.get());
+        stream.onCompleted();
+        deadLetterStream.onCompleted();
+    }
+
+    @Test
+    void streamingPullForwardsDeadLettersAfterReleasingTheStreamLock() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String deadLetterTopic = "projects/p1/topics/dlq";
+        String subscription = "projects/p1/subscriptions/s1";
+        String deadLetterSubscription = "projects/p1/subscriptions/dlq-sub";
+        service.createTopic(topic);
+        service.createTopic(deadLetterTopic);
+        service.createSubscription(deadLetterSubscription, deadLetterTopic, 60);
+        createDeadLetterSubscription(subscription, topic, deadLetterTopic);
+        RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> stream = controller.streamingPull(responses);
+        stream.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription).build());
+        AtomicReference<String> streamLock = new AtomicReference<>("the dead letter was never published");
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            // A delivery on the dead-letter subscription can take another stream's lock. If the forwarding
+            // stream still held its own, two streams that dead-letter into each other's topics would deadlock.
+            service.registerMessageListener(deadLetterSubscription, () -> {
+                Future<?> otherRequest = executor.submit(() -> stream.onNext(StreamingPullRequest.getDefaultInstance()));
+                try {
+                    otherRequest.get(5, TimeUnit.SECONDS);
+                    streamLock.set("free");
+                } catch (TimeoutException e) {
+                    streamLock.set("held while forwarding the dead letter");
+                } catch (Exception e) {
+                    streamLock.set(e.toString());
+                }
+            });
+            service.publish(topic, List.of(PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFromUtf8("msg")).build()));
+            for (int attempt = 1; attempt <= 5; attempt++) {
+                assertTrue(responses.awaitValues(attempt), "delivery " + attempt + " should reach the stream");
+                stream.onNext(StreamingPullRequest.newBuilder()
+                        .addModifyDeadlineAckIds(responses.values.get(attempt - 1).getReceivedMessages(0).getAckId())
+                        .addModifyDeadlineSeconds(0)
+                        .build());
+            }
+        }
+
+        assertEquals("free", streamLock.get());
+        stream.onCompleted();
+    }
+
+    private void createDeadLetterSubscription(String subscription, String topic, String deadLetterTopic) {
+        service.createSubscription(subscription, topic, 60, null, false, null, null, null,
+                null, null, null, deadLetterTopic, 5, false, false);
+    }
+
+    @Test
     void streamingPullRedeliversOnTheStreamOnceTheStreamAckDeadlinePasses() throws Exception {
         String topic = "projects/p1/topics/t1";
         String subscription = "projects/p1/subscriptions/s1";
@@ -566,6 +658,25 @@ class PubSubSubscriberControllerTest {
         assertEquals("attributes.event_type = \"match\"", responseObserver.values.get(0).getFilter());
         assertEquals("attributes.event_type = \"match\"",
                 service.getSubscription("projects/p1/subscriptions/s1").getFilter());
+    }
+
+    @Test
+    void createSubscriptionOverGrpcStoresTheDeadLetterPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/s1")
+                .setTopic("projects/p1/topics/t1")
+                .setDeadLetterPolicy(DeadLetterPolicy.newBuilder().setDeadLetterTopic("projects/p1/topics/dlq"))
+                .build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        assertEquals("projects/p1/topics/dlq", responseObserver.values.get(0).getDeadLetterPolicy().getDeadLetterTopic());
+        assertEquals(5, responseObserver.values.get(0).getDeadLetterPolicy().getMaxDeliveryAttempts());
+        assertEquals("projects/p1/topics/dlq",
+                service.getSubscription("projects/p1/subscriptions/s1").getDeadLetterTopic());
     }
 
     @Test

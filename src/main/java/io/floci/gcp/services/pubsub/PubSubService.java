@@ -5,10 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.Timestamps;
+import com.google.pubsub.v1.DeadLetterPolicy;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.GcpResourceNames;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
@@ -34,6 +36,8 @@ import java.net.http.HttpResponse;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Set;
@@ -68,11 +72,18 @@ public class PubSubService {
 
     private static final Duration LEASE_EXPIRY_INTERVAL = Duration.ofSeconds(1);
 
+    private static final int DEFAULT_MAX_DELIVERY_ATTEMPTS = 5;
+
+    private static final DateTimeFormatter DEAD_LETTER_PUBLISH_TIME =
+            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSxxx").withZone(ZoneOffset.UTC);
+
+    private static final Runnable NO_FOLLOW_UP = () -> { };
+
     private final StorageBackend<String, StoredTopic> topicStore;
     private final StorageBackend<String, StoredSubscription> subStore;
     private final StorageBackend<String, StoredSnapshot> snapshotStore;
 
-    private final ConcurrentHashMap<String, ConcurrentLinkedDeque<StoredMessage>> queues = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConcurrentLinkedDeque<QueuedMessage>> queues = new ConcurrentHashMap<>();
     // Each lease map is also the lock for moving that subscription's messages between queue and leases,
     // so a seek never misses a message in transit. It is the innermost lock, so never notify listeners under it.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Lease>> delivered = new ConcurrentHashMap<>();
@@ -299,7 +310,7 @@ public class PubSubService {
         sub.setExpirationPolicy(emptyObjectMapToNull(expirationPolicy));
         sub.setRetryPolicy(emptyObjectMapToNull(retryPolicy));
         sub.setDeadLetterTopic(blankToNull(deadLetterTopic));
-        sub.setMaxDeliveryAttempts(maxDeliveryAttempts);
+        sub.setMaxDeliveryAttempts(maxDeliveryAttempts(sub.getDeadLetterTopic(), maxDeliveryAttempts));
         sub.setEnableMessageOrdering(enableMessageOrdering);
         sub.setEnableExactlyOnceDelivery(enableExactlyOnceDelivery);
         subStore.put(name, sub);
@@ -350,10 +361,10 @@ public class PubSubService {
                         subProto.getPushConfig().getPushEndpoint().isEmpty() ? null
                                 : subProto.getPushConfig().getPushEndpoint());
                 case "dead_letter_policy" -> {
-                    if (subProto.hasDeadLetterPolicy()) {
-                        stored.setDeadLetterTopic(subProto.getDeadLetterPolicy().getDeadLetterTopic());
-                        stored.setMaxDeliveryAttempts(subProto.getDeadLetterPolicy().getMaxDeliveryAttempts());
-                    }
+                    DeadLetterPolicy policy = subProto.getDeadLetterPolicy();
+                    stored.setDeadLetterTopic(blankToNull(policy.getDeadLetterTopic()));
+                    stored.setMaxDeliveryAttempts(
+                            maxDeliveryAttempts(stored.getDeadLetterTopic(), policy.getMaxDeliveryAttempts()));
                 }
             }
         }
@@ -414,7 +425,8 @@ public class PubSubService {
         }
         if (replaceAll || masked(updateMaskPaths, "dead_letter_policy")) {
             stored.setDeadLetterTopic(blankToNull(deadLetterTopic));
-            stored.setMaxDeliveryAttempts(maxDeliveryAttempts == null ? 0 : maxDeliveryAttempts);
+            stored.setMaxDeliveryAttempts(maxDeliveryAttempts(stored.getDeadLetterTopic(),
+                    maxDeliveryAttempts == null ? 0 : maxDeliveryAttempts));
         }
         if (replaceAll || masked(updateMaskPaths, "enable_message_ordering")) {
             if (enableMessageOrdering != null) {
@@ -505,7 +517,8 @@ public class PubSubService {
                     if (sub.getPushEndpoint() != null) {
                         pushDeliveryExecutor.submit(() -> deliverPushMessage(sub, stored));
                     } else {
-                        queues.computeIfAbsent(entry, k -> new ConcurrentLinkedDeque<>()).add(stored);
+                        queues.computeIfAbsent(entry, k -> new ConcurrentLinkedDeque<>())
+                                .add(new QueuedMessage(stored, 0));
                         notifyListeners(entry);
                     }
                     fanOut++;
@@ -640,21 +653,24 @@ public class PubSubService {
                 ? Math.clamp(streamAckDeadlineSeconds, MIN_STREAM_ACK_DEADLINE_SECONDS, MAX_ACK_DEADLINE_SECONDS)
                 : sub.getAckDeadlineSeconds();
 
-        ConcurrentLinkedDeque<StoredMessage> queue = queues.computeIfAbsent(subName, k -> new ConcurrentLinkedDeque<>());
+        ConcurrentLinkedDeque<QueuedMessage> queue = queues.computeIfAbsent(subName, k -> new ConcurrentLinkedDeque<>());
         ConcurrentHashMap<String, Lease> deliveredMap = delivered.computeIfAbsent(subName, k -> new ConcurrentHashMap<>());
 
         List<ReceivedMessage> result = new ArrayList<>();
         int count = 0;
         while (count < maxMessages) {
             String ackId = UUID.randomUUID().toString();
-            StoredMessage msg;
+            Lease lease;
             synchronized (deliveredMap) {
-                msg = queue.poll();
-                if (msg == null) {
+                QueuedMessage queued = queue.poll();
+                if (queued == null) {
                     break;
                 }
-                deliveredMap.put(ackId, new Lease(msg, clock.instant().plusSeconds(ackDeadlineSeconds)));
+                lease = new Lease(queued.message(), queued.deliveryCount() + 1,
+                        clock.instant().plusSeconds(ackDeadlineSeconds));
+                deliveredMap.put(ackId, lease);
             }
+            StoredMessage msg = lease.message();
 
             PubsubMessage.Builder msgBuilder = PubsubMessage.newBuilder()
                     .setMessageId(msg.getMessageId())
@@ -668,10 +684,14 @@ public class PubSubService {
                 msgBuilder.setOrderingKey(msg.getOrderingKey());
             }
 
-            result.add(ReceivedMessage.newBuilder()
+            ReceivedMessage.Builder received = ReceivedMessage.newBuilder()
                     .setAckId(ackId)
-                    .setMessage(msgBuilder.build())
-                    .build());
+                    .setMessage(msgBuilder.build());
+            // GCP leaves delivery_attempt at 0 on a subscription without a dead-letter policy.
+            if (sub.getDeadLetterTopic() != null) {
+                received.setDeliveryAttempt(lease.deliveryCount());
+            }
+            result.add(received.build());
             count++;
         }
         LOG.debugf("pull subscription=%s returned=%d", subName, result.size());
@@ -697,12 +717,11 @@ public class PubSubService {
     // ── ModifyAckDeadline ──────────────────────────────────────────────────────
 
     public void modifyAckDeadline(String subName, List<String> ackIds, int ackDeadlineSeconds) {
-        if (modifyAckDeadlineWithoutNotification(subName, ackIds, ackDeadlineSeconds)) {
-            notifyListeners(subName);
-        }
+        modifyAckDeadlineWithoutNotification(subName, ackIds, ackDeadlineSeconds).run();
     }
 
-    boolean modifyAckDeadlineWithoutNotification(String subName, List<String> ackIds, int ackDeadlineSeconds) {
+    // The returned follow-up wakes streams and publishes dead letters. Run it once no lock is held.
+    Runnable modifyAckDeadlineWithoutNotification(String subName, List<String> ackIds, int ackDeadlineSeconds) {
         LOG.debugf("modifyAckDeadline subscription=%s ackIds=%d deadline=%d",
                 subName, ackIds.size(), ackDeadlineSeconds);
         if (ackDeadlineSeconds < 0 || ackDeadlineSeconds > MAX_ACK_DEADLINE_SECONDS) {
@@ -712,15 +731,15 @@ public class PubSubService {
         if (ackIds.isEmpty()) {
             throw GcpException.invalidArgument("You have not specified an ack ID in the request.");
         }
-        if (subStore.get(subName).isEmpty()) {
+        StoredSubscription sub = subStore.get(subName).orElseThrow(() -> {
             LOG.warnf("modifyAckDeadline failed: subscription not found name=%s", subName);
-            throw GcpException.notFound("Subscription not found: " + subName);
-        }
+            return GcpException.notFound("Subscription not found: " + subName);
+        });
         if (ackDeadlineSeconds > 0) {
             extendLeases(subName, ackIds, ackDeadlineSeconds);
-            return false;
+            return NO_FOLLOW_UP;
         }
-        return nack(subName, ackIds);
+        return nack(sub, ackIds);
     }
 
     private void extendLeases(String subName, List<String> ackIds, int ackDeadlineSeconds) {
@@ -733,32 +752,36 @@ public class PubSubService {
         for (String ackId : ackIds) {
             // An expired lease is not revived, matching GCP.
             deliveredMap.computeIfPresent(ackId,
-                    (id, lease) -> lease.isExpired(now) ? lease : new Lease(lease.message(), expiry));
+                    (id, lease) -> lease.isExpired(now) ? lease : lease.withExpiry(expiry));
         }
     }
 
-    private boolean nack(String subName, List<String> ackIds) {
+    private Runnable nack(StoredSubscription sub, List<String> ackIds) {
+        String subName = sub.getName();
         ConcurrentHashMap<String, Lease> deliveredMap = delivered.get(subName);
-        ConcurrentLinkedDeque<StoredMessage> queue = queues.get(subName);
+        ConcurrentLinkedDeque<QueuedMessage> queue = queues.get(subName);
         if (deliveredMap == null || queue == null) {
             // Deleted or detached in the meantime: there is no live queue to return the messages to.
-            return false;
+            return NO_FOLLOW_UP;
         }
-        List<StoredMessage> requeued = new ArrayList<>();
+        int deadLetterThreshold = deadLetterThreshold(sub);
+        List<Lease> released = new ArrayList<>();
+        List<Lease> deadLetters;
         synchronized (deliveredMap) {
             for (String ackId : ackIds) {
                 Lease lease = deliveredMap.remove(ackId);
                 if (lease != null) {
-                    requeued.add(lease.message());
+                    released.add(lease);
                 }
             }
-            requeueAtFront(queue, requeued);
+            deadLetters = requeueOrDeadLetter(queue, released, deadLetterThreshold);
         }
-        if (requeued.isEmpty()) {
-            return false;
+        if (released.isEmpty()) {
+            return NO_FOLLOW_UP;
         }
-        LOG.debugf("nack subscription=%s requeued=%d", subName, requeued.size());
-        return true;
+        LOG.debugf("nack subscription=%s requeued=%d deadLettered=%d",
+                subName, released.size() - deadLetters.size(), deadLetters.size());
+        return followUp(sub, deliveredMap, queue, released.size() > deadLetters.size(), deadLetters);
     }
 
     private void expireLeasesSafely() {
@@ -772,40 +795,156 @@ public class PubSubService {
 
     void expireLeases() {
         for (Map.Entry<String, ConcurrentHashMap<String, Lease>> entry : delivered.entrySet()) {
-            if (requeueExpiredLeases(entry.getKey(), entry.getValue())) {
-                notifyListeners(entry.getKey());
-            }
+            requeueExpiredLeases(entry.getKey(), entry.getValue()).run();
         }
     }
 
-    private boolean requeueExpiredLeases(String subName, ConcurrentHashMap<String, Lease> deliveredMap) {
-        ConcurrentLinkedDeque<StoredMessage> queue = queues.get(subName);
-        if (queue == null || delivered.get(subName) != deliveredMap) {
-            // Deleted, detached or recreated since the sweep started: these messages belong to no live queue.
-            return false;
+    private Runnable requeueExpiredLeases(String subName, ConcurrentHashMap<String, Lease> deliveredMap) {
+        if (deliveredMap.isEmpty()) {
+            return NO_FOLLOW_UP;
         }
-        List<StoredMessage> requeued = new ArrayList<>();
+        ConcurrentLinkedDeque<QueuedMessage> queue = queues.get(subName);
+        Optional<StoredSubscription> sub = subStore.get(subName);
+        if (queue == null || sub.isEmpty() || delivered.get(subName) != deliveredMap) {
+            // Deleted, detached or recreated since the sweep started: these messages belong to no live queue.
+            return NO_FOLLOW_UP;
+        }
+        int deadLetterThreshold = deadLetterThreshold(sub.get());
+        List<Lease> expired = new ArrayList<>();
+        List<Lease> deadLetters;
         synchronized (deliveredMap) {
             Instant now = clock.instant();
             for (Map.Entry<String, Lease> entry : deliveredMap.entrySet()) {
                 Lease lease = entry.getValue();
                 // remove(key, value) loses to a concurrent ack or extension of the same lease.
                 if (lease.isExpired(now) && deliveredMap.remove(entry.getKey(), lease)) {
-                    requeued.add(lease.message());
+                    expired.add(lease);
                 }
             }
-            requeueAtFront(queue, requeued);
+            deadLetters = requeueOrDeadLetter(queue, expired, deadLetterThreshold);
         }
-        if (requeued.isEmpty()) {
-            return false;
+        if (expired.isEmpty()) {
+            return NO_FOLLOW_UP;
         }
-        LOG.debugf("lease expiry subscription=%s requeued=%d", subName, requeued.size());
-        return true;
+        LOG.debugf("lease expiry subscription=%s requeued=%d deadLettered=%d",
+                subName, expired.size() - deadLetters.size(), deadLetters.size());
+        return followUp(sub.get(), deliveredMap, queue, expired.size() > deadLetters.size(), deadLetters);
     }
 
-    private record Lease(StoredMessage message, Instant expiry) {
+    // Called under the lease lock. Returns the leases to dead-letter and puts the rest back in the queue.
+    private static List<Lease> requeueOrDeadLetter(ConcurrentLinkedDeque<QueuedMessage> queue, List<Lease> released,
+            int deadLetterThreshold) {
+        List<QueuedMessage> requeued = new ArrayList<>();
+        List<Lease> deadLetters = new ArrayList<>();
+        for (Lease lease : released) {
+            if (lease.deliveryCount() >= deadLetterThreshold) {
+                deadLetters.add(lease);
+            } else {
+                requeued.add(lease.requeued());
+            }
+        }
+        requeueAtFront(queue, requeued);
+        return deadLetters;
+    }
+
+    // GCP does not forward while the dead-letter topic is gone. It keeps redelivering the message instead,
+    // and the delivery attempt keeps counting past the maximum.
+    private int deadLetterThreshold(StoredSubscription sub) {
+        if (sub.getDeadLetterTopic() == null || topicStore.get(sub.getDeadLetterTopic()).isEmpty()) {
+            return Integer.MAX_VALUE;
+        }
+        return maxDeliveryAttempts(sub.getDeadLetterTopic(), sub.getMaxDeliveryAttempts());
+    }
+
+    // GCP stores 5 when a dead-letter policy leaves max_delivery_attempts at 0. Subscriptions saved before
+    // this default was applied still hold 0, so delivery reads the value through here too.
+    private static int maxDeliveryAttempts(String deadLetterTopic, int requested) {
+        if (deadLetterTopic == null) {
+            return 0;
+        }
+        return requested == 0 ? DEFAULT_MAX_DELIVERY_ATTEMPTS : requested;
+    }
+
+    private Runnable followUp(StoredSubscription sub, ConcurrentHashMap<String, Lease> deliveredMap,
+            ConcurrentLinkedDeque<QueuedMessage> queue, boolean requeued, List<Lease> deadLetters) {
+        return () -> {
+            if (requeued) {
+                notifyListeners(sub.getName());
+            }
+            if (!deadLetters.isEmpty()) {
+                forwardToDeadLetterTopic(sub, deliveredMap, queue, deadLetters);
+            }
+        };
+    }
+
+    private void forwardToDeadLetterTopic(StoredSubscription sub, ConcurrentHashMap<String, Lease> deliveredMap,
+            ConcurrentLinkedDeque<QueuedMessage> queue, List<Lease> deadLetters) {
+        List<PubsubMessage> messages = deadLetters.stream()
+                .map(lease -> deadLetterMessage(sub, lease))
+                .toList();
+        try {
+            publish(sub.getDeadLetterTopic(), messages);
+        } catch (GcpException e) {
+            // The topic was deleted after the threshold check. Redeliver rather than lose the messages.
+            LOG.warnf("dead-letter forwarding failed subscription=%s topic=%s: %s",
+                    sub.getName(), sub.getDeadLetterTopic(), e.getMessage());
+            if (delivered.get(sub.getName()) != deliveredMap) {
+                // Deleted, detached or recreated in the meantime: these messages belong to no live queue.
+                return;
+            }
+            List<QueuedMessage> requeued = new ArrayList<>(deadLetters.stream().map(Lease::requeued).toList());
+            synchronized (deliveredMap) {
+                requeueAtFront(queue, requeued);
+            }
+            notifyListeners(sub.getName());
+        }
+    }
+
+    private static PubsubMessage deadLetterMessage(StoredSubscription sub, Lease lease) {
+        StoredMessage message = lease.message();
+        PubsubMessage.Builder builder = PubsubMessage.newBuilder()
+                .setData(message.getData() != null ? ByteString.copyFrom(message.getData()) : ByteString.EMPTY);
+        if (message.getAttributes() != null) {
+            builder.putAllAttributes(message.getAttributes());
+        }
+        if (message.getOrderingKey() != null) {
+            builder.setOrderingKey(message.getOrderingKey());
+        }
+        builder.putAttributes("CloudPubSubDeadLetterSourceDeliveryCount", String.valueOf(lease.deliveryCount()))
+                .putAttributes("CloudPubSubDeadLetterSourceSubscription", GcpResourceNames.lastSegment(sub.getName()))
+                .putAttributes("CloudPubSubDeadLetterSourceSubscriptionProject",
+                        GcpResourceNames.parseProject(sub.getName()))
+                .putAttributes("CloudPubSubDeadLetterSourceTopicPublishTime",
+                        deadLetterPublishTime(message.getPublishTime()));
+        return builder.build();
+    }
+
+    // GCP writes this attribute with milliseconds and a "+00:00" offset, unlike publishTime.
+    private static String deadLetterPublishTime(String publishTime) {
+        try {
+            return DEAD_LETTER_PUBLISH_TIME.format(Instant.parse(publishTime));
+        } catch (DateTimeParseException e) {
+            // publish() always stores Instant.toString(), so this only happens with corrupt state.
+            LOG.warnf("dead-letter: cannot parse publishTime=%s, passing it through: %s", publishTime, e.getMessage());
+            return publishTime;
+        }
+    }
+
+    // A message waiting in one subscription's queue. The count is per subscription, which a shared StoredMessage
+    // can't hold, and it survives nacks, expiry and seeks like GCP's delivery attempt does.
+    private record QueuedMessage(StoredMessage message, int deliveryCount) {}
+
+    private record Lease(StoredMessage message, int deliveryCount, Instant expiry) {
         boolean isExpired(Instant now) {
             return !expiry.isAfter(now);
+        }
+
+        Lease withExpiry(Instant newExpiry) {
+            return new Lease(message, deliveryCount, newExpiry);
+        }
+
+        QueuedMessage requeued() {
+            return new QueuedMessage(message, deliveryCount);
         }
     }
 
@@ -912,16 +1051,16 @@ public class PubSubService {
         }
         // Seek to a time: messages published before it count as acknowledged and are dropped,
         // messages published at or after it become unacknowledged again, including in-flight ones.
-        ConcurrentLinkedDeque<StoredMessage> queue =
+        ConcurrentLinkedDeque<QueuedMessage> queue =
                 queues.computeIfAbsent(subscriptionName, k -> new ConcurrentLinkedDeque<>());
         Instant seekTime = cutoff;
         synchronized (deliveredMap) {
-            queue.removeIf(msg -> isBefore(msg.getPublishTime(), seekTime));
-            List<StoredMessage> requeued = new ArrayList<>();
+            queue.removeIf(queued -> isBefore(queued.message().getPublishTime(), seekTime));
+            List<QueuedMessage> requeued = new ArrayList<>();
             for (String ackId : List.copyOf(deliveredMap.keySet())) {
                 Lease lease = deliveredMap.remove(ackId);
                 if (lease != null && !isBefore(lease.message().getPublishTime(), seekTime)) {
-                    requeued.add(lease.message());
+                    requeued.add(lease.requeued());
                 }
             }
             requeueAtFront(queue, requeued);
@@ -932,16 +1071,16 @@ public class PubSubService {
     }
 
     // deliveredMap iterates in ack id hash order; put redelivered messages back in publish order.
-    private static void requeueAtFront(ConcurrentLinkedDeque<StoredMessage> queue, List<StoredMessage> messages) {
+    private static void requeueAtFront(ConcurrentLinkedDeque<QueuedMessage> queue, List<QueuedMessage> messages) {
         messages.sort(PUBLISH_ORDER);
         for (int i = messages.size() - 1; i >= 0; i--) {
             queue.addFirst(messages.get(i));
         }
     }
 
-    private static final Comparator<StoredMessage> PUBLISH_ORDER = Comparator
-            .comparing((StoredMessage m) -> publishInstant(m.getPublishTime()))
-            .thenComparingLong(m -> messageIdOrder(m.getMessageId()));
+    private static final Comparator<QueuedMessage> PUBLISH_ORDER = Comparator
+            .comparing((QueuedMessage q) -> publishInstant(q.message().getPublishTime()))
+            .thenComparingLong(q -> messageIdOrder(q.message().getMessageId()));
 
     private static Instant publishInstant(String publishTime) {
         if (publishTime == null) {

@@ -399,6 +399,9 @@ public class PubSubRestController {
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("ackId", received.getAckId());
         response.put("message", messageResponse(received.getMessage()));
+        if (received.getDeliveryAttempt() > 0) {
+            response.put("deliveryAttempt", received.getDeliveryAttempt());
+        }
         return response;
     }
 

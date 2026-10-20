@@ -24,6 +24,7 @@ import com.google.iam.v1.TestIamPermissionsResponse;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.FieldMask;
 import com.google.pubsub.v1.AcknowledgeRequest;
+import com.google.pubsub.v1.DeadLetterPolicy;
 import com.google.pubsub.v1.DetachSubscriptionRequest;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.ProjectSubscriptionName;
@@ -801,6 +802,70 @@ class PubSubTest {
             }
         } finally {
             deleteQuietly(subName, topicName);
+        }
+    }
+
+    @Test
+    @Order(23)
+    void nackedMessageGoesToTheDeadLetterTopicAfterMaxDeliveryAttempts() throws Exception {
+        ProjectTopicName topicName = ProjectTopicName.of(PROJECT_ID, TestFixtures.uniqueName("dlq-source-topic"));
+        ProjectTopicName deadLetterTopicName = ProjectTopicName.of(PROJECT_ID, TestFixtures.uniqueName("dlq-topic"));
+        ProjectSubscriptionName subName = ProjectSubscriptionName.of(PROJECT_ID, TestFixtures.uniqueName("dlq-source-sub"));
+        ProjectSubscriptionName deadLetterSubName = ProjectSubscriptionName.of(PROJECT_ID, TestFixtures.uniqueName("dlq-sub"));
+
+        topicAdminClient.createTopic(topicName);
+        topicAdminClient.createTopic(deadLetterTopicName);
+        subscriptionAdminClient.createSubscription(
+                deadLetterSubName, deadLetterTopicName, PushConfig.getDefaultInstance(), 60);
+        Subscription created = subscriptionAdminClient.createSubscription(Subscription.newBuilder()
+                .setName(subName.toString())
+                .setTopic(topicName.toString())
+                .setAckDeadlineSeconds(60)
+                .setDeadLetterPolicy(DeadLetterPolicy.newBuilder()
+                        .setDeadLetterTopic(deadLetterTopicName.toString()))
+                .build());
+        try {
+            assertThat(created.getDeadLetterPolicy().getMaxDeliveryAttempts()).isEqualTo(5);
+            publishOne(topicName, "poison");
+
+            SubscriberStubSettings subscriberStubSettings = SubscriberStubSettings.newBuilder()
+                    .setTransportChannelProvider(channelProvider)
+                    .setCredentialsProvider(credentialsProvider)
+                    .build();
+            try (GrpcSubscriberStub subscriberStub = GrpcSubscriberStub.create(subscriberStubSettings)) {
+                PullRequest pullRequest = PullRequest.newBuilder()
+                        .setSubscription(subName.toString())
+                        .setMaxMessages(1)
+                        .build();
+                for (int attempt = 1; attempt <= 5; attempt++) {
+                    PullResponse response = subscriberStub.pullCallable().call(pullRequest);
+                    assertThat(response.getReceivedMessagesList()).hasSize(1);
+                    ReceivedMessage received = response.getReceivedMessages(0);
+                    assertThat(received.getDeliveryAttempt()).isEqualTo(attempt);
+                    subscriberStub.modifyAckDeadlineCallable().call(ModifyAckDeadlineRequest.newBuilder()
+                            .setSubscription(subName.toString())
+                            .addAckIds(received.getAckId())
+                            .setAckDeadlineSeconds(0)
+                            .build());
+                }
+                assertThat(subscriberStub.pullCallable().call(pullRequest).getReceivedMessagesList()).isEmpty();
+
+                PullResponse dead = subscriberStub.pullCallable().call(PullRequest.newBuilder()
+                        .setSubscription(deadLetterSubName.toString())
+                        .setMaxMessages(1)
+                        .build());
+                assertThat(dead.getReceivedMessagesList()).hasSize(1);
+                PubsubMessage deadLetter = dead.getReceivedMessages(0).getMessage();
+                assertThat(deadLetter.getData().toStringUtf8()).isEqualTo("poison");
+                assertThat(deadLetter.getAttributesMap())
+                        .containsEntry("CloudPubSubDeadLetterSourceDeliveryCount", "5")
+                        .containsEntry("CloudPubSubDeadLetterSourceSubscription", subName.getSubscription())
+                        .containsEntry("CloudPubSubDeadLetterSourceSubscriptionProject", PROJECT_ID)
+                        .containsKey("CloudPubSubDeadLetterSourceTopicPublishTime");
+            }
+        } finally {
+            deleteQuietly(subName, topicName);
+            deleteQuietly(deadLetterSubName, deadLetterTopicName);
         }
     }
 

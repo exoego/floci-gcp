@@ -62,11 +62,13 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
     public void createSubscription(Subscription request, StreamObserver<Subscription> responseObserver) {
         LOG.infof("createSubscription name=%s topic=%s", request.getName(), request.getTopic());
         try {
+            DeadLetterPolicy deadLetterPolicy = request.getDeadLetterPolicy();
             StoredSubscription stored = service.createSubscription(
                     request.getName(), request.getTopic(), request.getAckDeadlineSeconds(),
                     null, false, null, request.getFilter(),
                     request.hasPushConfig() ? request.getPushConfig().getPushEndpoint() : null,
-                    null, null, null, null, 0, false, false);
+                    null, null, null,
+                    deadLetterPolicy.getDeadLetterTopic(), deadLetterPolicy.getMaxDeliveryAttempts(), false, false);
             responseObserver.onNext(buildSubscription(stored));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -255,7 +257,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         };
     }
 
-    private void modifyStreamingAckDeadlines(String sub, StreamingPullRequest request, AtomicBoolean requeued) {
+    private void modifyStreamingAckDeadlines(String sub, StreamingPullRequest request, List<Runnable> followUps) {
         if (request.getModifyDeadlineAckIdsCount() != request.getModifyDeadlineSecondsCount()) {
             throw GcpException.invalidArgument("modify_deadline_ack_ids has " + request.getModifyDeadlineAckIdsCount()
                     + " entries but modify_deadline_seconds has " + request.getModifyDeadlineSecondsCount()
@@ -269,9 +271,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                     .add(request.getModifyDeadlineAckIds(i));
         }
         for (Map.Entry<Integer, List<String>> entry : ackIdsByDeadline.entrySet()) {
-            if (service.modifyAckDeadlineWithoutNotification(sub, entry.getValue(), entry.getKey())) {
-                requeued.set(true);
-            }
+            followUps.add(service.modifyAckDeadlineWithoutNotification(sub, entry.getValue(), entry.getKey()));
         }
     }
 
@@ -283,7 +283,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             IamGrpcDeliveryAuthorization.Delivery deliveryAuthorization,
             StreamingPullRequest request,
             int streamAckDeadlineSeconds) {
-        AtomicBoolean requeued = new AtomicBoolean(false);
+        List<Runnable> followUps = new ArrayList<>();
         try {
             Runnable delivery = () -> {
                 synchronized (deliveryLock) {
@@ -295,7 +295,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                         service.acknowledge(sub, request.getAckIdsList());
                     }
                     if (request.getModifyDeadlineAckIdsCount() > 0 || request.getModifyDeadlineSecondsCount() > 0) {
-                        modifyStreamingAckDeadlines(sub, request, requeued);
+                        modifyStreamingAckDeadlines(sub, request, followUps);
                     }
                     List<ReceivedMessage> messages = service.pull(sub, 1000, streamAckDeadlineSeconds);
                     if (!messages.isEmpty()) {
@@ -313,9 +313,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         } catch (Exception e) {
             failStreamingPull(responseObserver, unregisterRef, closed, deliveryLock, e);
         } finally {
-            if (requeued.get()) {
-                service.notifyListeners(sub);
-            }
+            followUps.forEach(Runnable::run);
         }
     }
 

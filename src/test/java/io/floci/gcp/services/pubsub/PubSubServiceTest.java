@@ -23,6 +23,8 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -804,6 +806,216 @@ class PubSubServiceTest {
         service.expireLeases();
 
         assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+    }
+
+    @Test
+    void deliveryAttemptCountsNacksAndExpiredDeadlines() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 10);
+        publish("msg");
+
+        ReceivedMessage first = pullOne("projects/p1/subscriptions/s1");
+        assertEquals(1, first.getDeliveryAttempt());
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(first.getAckId()), 0);
+        assertEquals(2, pullOne("projects/p1/subscriptions/s1").getDeliveryAttempt());
+        clock.advance(Duration.ofSeconds(60));
+        service.expireLeases();
+        assertEquals(3, pullOne("projects/p1/subscriptions/s1").getDeliveryAttempt());
+    }
+
+    @Test
+    void deliveryAttemptStaysZeroWithoutADeadLetterPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 60);
+        publish("msg");
+
+        ReceivedMessage first = pullOne("projects/p1/subscriptions/s1");
+        assertEquals(0, first.getDeliveryAttempt());
+        service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(first.getAckId()), 0);
+        assertEquals(0, pullOne("projects/p1/subscriptions/s1").getDeliveryAttempt());
+    }
+
+    @Test
+    void deliveryAttemptIsCountedPerSubscription() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 5);
+        createDeadLetterSubscription("projects/p1/subscriptions/s2", "projects/p1/topics/dlq", 5);
+        publish("msg");
+
+        for (int i = 0; i < 2; i++) {
+            service.modifyAckDeadline("projects/p1/subscriptions/s1",
+                    List.of(pullOne("projects/p1/subscriptions/s1").getAckId()), 0);
+        }
+
+        assertEquals(3, pullOne("projects/p1/subscriptions/s1").getDeliveryAttempt());
+        assertEquals(1, pullOne("projects/p1/subscriptions/s2").getDeliveryAttempt());
+    }
+
+    @Test
+    void nackedMessageMovesToTheDeadLetterTopicAfterMaxDeliveryAttempts() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        service.createSubscription("projects/p1/subscriptions/dlq-sub", "projects/p1/topics/dlq", 60);
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 5);
+        service.publish("projects/p1/topics/t1", List.of(PubsubMessage.newBuilder()
+                .setData(ByteString.copyFromUtf8("msg"))
+                .putAttributes("k", "v")
+                .setOrderingKey("key1")
+                .build()));
+
+        PubsubMessage original = null;
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            ReceivedMessage received = pullOne("projects/p1/subscriptions/s1");
+            assertEquals(attempt, received.getDeliveryAttempt());
+            original = received.getMessage();
+            service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(received.getAckId()), 0);
+        }
+
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+        List<ReceivedMessage> dead = service.pull("projects/p1/subscriptions/dlq-sub", 10);
+        assertEquals(1, dead.size());
+        assertEquals(0, dead.get(0).getDeliveryAttempt());
+        PubsubMessage deadLetter = dead.get(0).getMessage();
+        assertNotEquals(original.getMessageId(), deadLetter.getMessageId());
+        assertEquals("msg", deadLetter.getData().toStringUtf8());
+        assertEquals("key1", deadLetter.getOrderingKey());
+        Map<String, String> attributes = deadLetter.getAttributesMap();
+        assertEquals(5, attributes.size());
+        assertEquals("v", attributes.get("k"));
+        assertEquals("5", attributes.get("CloudPubSubDeadLetterSourceDeliveryCount"));
+        assertEquals("s1", attributes.get("CloudPubSubDeadLetterSourceSubscription"));
+        assertEquals("p1", attributes.get("CloudPubSubDeadLetterSourceSubscriptionProject"));
+        String sourcePublishTime = attributes.get("CloudPubSubDeadLetterSourceTopicPublishTime");
+        assertTrue(sourcePublishTime.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\+00:00"),
+                sourcePublishTime);
+        Instant publishTime = Instant.ofEpochSecond(
+                original.getPublishTime().getSeconds(), original.getPublishTime().getNanos());
+        assertEquals(publishTime.truncatedTo(ChronoUnit.MILLIS), OffsetDateTime.parse(sourcePublishTime).toInstant());
+    }
+
+    @Test
+    void expiredMessageMovesToTheDeadLetterTopicAfterMaxDeliveryAttempts() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        service.createSubscription("projects/p1/subscriptions/dlq-sub", "projects/p1/topics/dlq", 60);
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 5);
+        publish("msg");
+
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            assertEquals(attempt, pullOne("projects/p1/subscriptions/s1").getDeliveryAttempt());
+            clock.advance(Duration.ofSeconds(60));
+            service.expireLeases();
+        }
+
+        assertTrue(service.pull("projects/p1/subscriptions/s1", 10).isEmpty());
+        List<ReceivedMessage> dead = service.pull("projects/p1/subscriptions/dlq-sub", 10);
+        assertEquals(1, dead.size());
+        assertEquals("5", dead.get(0).getMessage().getAttributesMap().get("CloudPubSubDeadLetterSourceDeliveryCount"));
+    }
+
+    @Test
+    void deliveryAttemptKeepsCountingWhileTheDeadLetterTopicIsMissing() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 5);
+        service.deleteTopic("projects/p1/topics/dlq");
+        publish("msg");
+
+        for (int attempt = 1; attempt <= 7; attempt++) {
+            ReceivedMessage received = pullOne("projects/p1/subscriptions/s1");
+            assertEquals(attempt, received.getDeliveryAttempt());
+            service.modifyAckDeadline("projects/p1/subscriptions/s1", List.of(received.getAckId()), 0);
+        }
+    }
+
+    @Test
+    void seekKeepsTheDeliveryAttempt() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 5);
+        publish("msg");
+        service.modifyAckDeadline("projects/p1/subscriptions/s1",
+                List.of(pullOne("projects/p1/subscriptions/s1").getAckId()), 0);
+        assertEquals(2, pullOne("projects/p1/subscriptions/s1").getDeliveryAttempt());
+
+        service.seek("projects/p1/subscriptions/s1", null, secondsFromNow(-60));
+
+        assertEquals(3, pullOne("projects/p1/subscriptions/s1").getDeliveryAttempt());
+    }
+
+    @Test
+    void maxDeliveryAttemptsDefaultsToFive() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 0);
+        assertEquals(5, service.getSubscription("projects/p1/subscriptions/s1").getMaxDeliveryAttempts());
+
+        service.createSubscription("projects/p1/subscriptions/s2", "projects/p1/topics/t1", 60);
+        StoredSubscription updated = service.updateSubscription(com.google.pubsub.v1.Subscription.newBuilder()
+                        .setName("projects/p1/subscriptions/s2")
+                        .setDeadLetterPolicy(com.google.pubsub.v1.DeadLetterPolicy.newBuilder()
+                                .setDeadLetterTopic("projects/p1/topics/dlq"))
+                        .build(),
+                com.google.protobuf.FieldMask.newBuilder().addPaths("dead_letter_policy").build());
+        assertEquals("projects/p1/topics/dlq", updated.getDeadLetterTopic());
+        assertEquals(5, updated.getMaxDeliveryAttempts());
+    }
+
+    @Test
+    void updateWithoutADeadLetterPolicyInTheMaskRemovesIt() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        createDeadLetterSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/dlq", 5);
+
+        StoredSubscription updated = service.updateSubscription(com.google.pubsub.v1.Subscription.newBuilder()
+                        .setName("projects/p1/subscriptions/s1")
+                        .build(),
+                com.google.protobuf.FieldMask.newBuilder().addPaths("dead_letter_policy").build());
+
+        assertNull(updated.getDeadLetterTopic());
+        publish("msg");
+        assertEquals(0, pullOne("projects/p1/subscriptions/s1").getDeliveryAttempt());
+    }
+
+    @Test
+    void subscriptionSavedWithZeroMaxDeliveryAttemptsDeadLettersAfterFive() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        service.createSubscription("projects/p1/subscriptions/dlq-sub", "projects/p1/topics/dlq", 60);
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 60);
+        StoredSubscription saved = subStore.get("projects/p1/subscriptions/s1").orElseThrow();
+        saved.setDeadLetterTopic("projects/p1/topics/dlq");
+        saved.setMaxDeliveryAttempts(0);
+        subStore.put("projects/p1/subscriptions/s1", saved);
+        publish("msg");
+
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            service.modifyAckDeadline("projects/p1/subscriptions/s1",
+                    List.of(pullOne("projects/p1/subscriptions/s1").getAckId()), 0);
+            assertTrue(service.pull("projects/p1/subscriptions/dlq-sub", 10).isEmpty());
+        }
+        service.modifyAckDeadline("projects/p1/subscriptions/s1",
+                List.of(pullOne("projects/p1/subscriptions/s1").getAckId()), 0);
+
+        assertEquals(1, service.pull("projects/p1/subscriptions/dlq-sub", 10).size());
+    }
+
+    private void createDeadLetterSubscription(String name, String deadLetterTopic, int maxDeliveryAttempts) {
+        service.createSubscription(name, "projects/p1/topics/t1", 60, null, false, null, null, null,
+                null, null, null, deadLetterTopic, maxDeliveryAttempts, false, false);
+    }
+
+    private void publish(String data) {
+        service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8(data)).build()));
+    }
+
+    private ReceivedMessage pullOne(String subscription) {
+        List<ReceivedMessage> received = service.pull(subscription, 1);
+        assertEquals(1, received.size(), "expected one message on " + subscription);
+        return received.get(0);
     }
 
     @Test
