@@ -1,6 +1,7 @@
 package io.floci.gcp.services.cloudfunctions;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -56,7 +57,7 @@ class CloudFunctionsRestIntegrationTest {
                 .body("metadata.operationType", equalTo("CREATE_FUNCTION"))
                 .body("response.name", equalTo("projects/" + project + "/locations/" + location + "/functions/" + functionId));
 
-        String uploadUrl = given()
+        Response uploadTarget = given()
                 .urlEncodingEnabled(false)
                 .contentType("application/json")
                 .body("{}")
@@ -66,7 +67,10 @@ class CloudFunctionsRestIntegrationTest {
                 .body("uploadUrl", startsWith("http://"))
                 .body("storageSource.bucket", startsWith("gcf-v2-sources-functions-it-1-us-central1"))
                 .body("storageSource.object", startsWith("source-"))
-                .extract().path("uploadUrl");
+                .extract().response();
+        String uploadUrl = uploadTarget.path("uploadUrl");
+        String sourceBucket = uploadTarget.path("storageSource.bucket");
+        String sourceObject = uploadTarget.path("storageSource.object");
 
         given()
                 .contentType("application/octet-stream")
@@ -74,8 +78,16 @@ class CloudFunctionsRestIntegrationTest {
                 .when().put(URI.create(uploadUrl).getRawPath())
                 .then()
                 .statusCode(200)
-                .body("bucket", startsWith("gcf-v2-sources-functions-it-1-us-central1"))
-                .body("name", startsWith("source-"));
+                .header("ETag", notNullValue())
+                .body(emptyString());
+
+        given()
+                .when().get("/storage/v1/b/" + sourceBucket + "/o/" + sourceObject)
+                .then()
+                .statusCode(200)
+                .body("bucket", equalTo(sourceBucket))
+                .body("name", equalTo(sourceObject))
+                .body("size", equalTo("14"));
 
         given()
                 .urlEncodingEnabled(false)

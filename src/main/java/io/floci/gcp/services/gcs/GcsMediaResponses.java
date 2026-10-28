@@ -2,6 +2,7 @@ package io.floci.gcp.services.gcs;
 
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -9,6 +10,8 @@ import jakarta.ws.rs.core.Response;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Base64;
+import java.util.HexFormat;
 import java.util.Map;
 import java.util.StringJoiner;
 import java.util.zip.GZIPInputStream;
@@ -160,6 +163,36 @@ final class GcsMediaResponses {
         } catch (IOException e) {
             return null;
         }
+    }
+
+    /**
+     * The XML API PUT Object answer as GCS sends it: no body, which its upload server still
+     * labels {@code text/html}, the entity tag in quotes, and the generation and hash headers an
+     * S3-compatible client reads back to confirm the upload.
+     */
+    static Response uploadResponse(GcsObjectMeta meta) {
+        Response.ResponseBuilder builder = Response.ok()
+                .header(HttpHeaders.CONTENT_TYPE, "text/html; charset=UTF-8");
+        String etag = xmlEtag(meta);
+        if (etag != null) {
+            builder.header("ETag", "\"" + etag + "\"");
+        }
+        addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
+        addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
+        addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
+        addHeaderIfPresent(builder, "x-goog-stored-content-length", meta.getSize());
+        builder.header("x-goog-stored-content-encoding",
+                meta.getContentEncoding() != null ? meta.getContentEncoding() : "identity");
+        return builder.build();
+    }
+
+    // The XML API writes the entity tag of a non-composite object as its MD5 in hex, the
+    // same digest the object resource carries in base64.
+    private static String xmlEtag(GcsObjectMeta meta) {
+        if (meta.getMd5Hash() != null) {
+            return HexFormat.of().formatHex(Base64.getDecoder().decode(meta.getMd5Hash()));
+        }
+        return meta.getEtag();
     }
 
     private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder, GcsObjectMeta meta) {

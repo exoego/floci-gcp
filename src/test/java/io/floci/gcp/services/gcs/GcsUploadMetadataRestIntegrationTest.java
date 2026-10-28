@@ -189,9 +189,7 @@ class GcsUploadMetadataRestIntegrationTest {
                 .contentType("text/plain")
                 .body("xml")
                 .when().put("/" + BUCKET + "/xml-obj")
-                .then().statusCode(200)
-                .body("metadata.origname", equalTo("test.txt"))
-                .body("metadata.reviewer", equalTo("jane"));
+                .then().statusCode(200);
 
         given()
                 .when().get("/storage/v1/b/" + BUCKET + "/o/xml-obj")

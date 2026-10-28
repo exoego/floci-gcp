@@ -59,6 +59,11 @@ class GcsObjectNameRestIntegrationTest {
                     .contentType("application/octet-stream")
                     .body(CONTENT)
                     .when().put("/" + BUCKET + "/" + encodedXmlPath)
+                    .then().statusCode(200);
+
+            given()
+                    .urlEncodingEnabled(false)
+                    .when().get("/storage/v1/b/" + BUCKET + "/o/" + encodedXmlPath)
                     .then().statusCode(200)
                     .body("name", equalTo(xmlObjectName));
 

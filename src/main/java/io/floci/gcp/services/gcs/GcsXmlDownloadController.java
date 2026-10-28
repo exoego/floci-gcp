@@ -124,7 +124,7 @@ public class GcsXmlDownloadController {
                     bucket, objectPath, contentType, body != null ? body : new byte[0],
                     GcsCustomerEncryption.fromHeaders(headers), googMetaHeaders(headers), null,
                     GcsObjectPreconditions.NONE, baseUrl, overwriteAuthorization::require);
-            return Response.ok(meta, MediaType.APPLICATION_JSON).build();
+            return GcsMediaResponses.uploadResponse(meta);
         };
         String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
         return xmlAuthorization.call(authorization, () -> iamAuthorizationService.authorizeObjectCreate(
