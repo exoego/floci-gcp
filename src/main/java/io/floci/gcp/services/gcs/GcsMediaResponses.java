@@ -36,10 +36,21 @@ final class GcsMediaResponses {
      */
     static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
             String acceptEncoding) {
+        return mediaResponse(data, meta, rangeHeader, acceptEncoding, meta.getEtag());
+    }
+
+    /** The XML API download, which names the object by its XML entity tag, not the resource etag. */
+    static Response xmlMediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
+            String acceptEncoding) {
+        return mediaResponse(data, meta, rangeHeader, acceptEncoding, xmlEtag(meta));
+    }
+
+    private static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
+            String acceptEncoding, String etag) {
         if (shouldTranscode(meta, acceptEncoding)) {
             byte[] decompressed = gunzip(data);
             if (decompressed != null) {
-                return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta)
+                return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta, etag)
                         .header("Content-Length", decompressed.length)
                         .build();
             }
@@ -60,7 +71,7 @@ final class GcsMediaResponses {
             // Served as stored, so the client must be told to inflate it.
             builder.header("Content-Encoding", "gzip");
         }
-        return withMetadataHeaders(builder.type(meta.getContentType()), meta).build();
+        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag).build();
     }
 
     /**
@@ -173,10 +184,7 @@ final class GcsMediaResponses {
     static Response uploadResponse(GcsObjectMeta meta) {
         Response.ResponseBuilder builder = Response.ok()
                 .header(HttpHeaders.CONTENT_TYPE, "text/html; charset=UTF-8");
-        String etag = xmlEtag(meta);
-        if (etag != null) {
-            builder.header("ETag", "\"" + etag + "\"");
-        }
+        addHeaderIfPresent(builder, "ETag", xmlEtag(meta));
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
         addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
         addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
@@ -186,17 +194,27 @@ final class GcsMediaResponses {
         return builder.build();
     }
 
-    // The XML API writes the entity tag of a non-composite object as its MD5 in hex, the
-    // same digest the object resource carries in base64.
-    private static String xmlEtag(GcsObjectMeta meta) {
+    /**
+     * The entity tag as the XML API writes it, in quotes (probed live on 2026-10-29): the MD5 in
+     * hex for an object that has one, the ETag a multipart completion computed from its parts,
+     * and a dash before the resource etag for a composite object, which has no MD5.
+     */
+    static String xmlEtag(GcsObjectMeta meta) {
         if (meta.getMd5Hash() != null) {
-            return HexFormat.of().formatHex(Base64.getDecoder().decode(meta.getMd5Hash()));
+            return "\"" + HexFormat.of().formatHex(Base64.getDecoder().decode(meta.getMd5Hash())) + "\"";
         }
-        return meta.getEtag();
+        if (meta.getEtag() == null) {
+            return null;
+        }
+        if (meta.getComponentCount() != null) {
+            return "\"-" + meta.getEtag() + "\"";
+        }
+        return "\"" + meta.getEtag() + "\"";
     }
 
-    private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder, GcsObjectMeta meta) {
-        addHeaderIfPresent(builder, "ETag", meta.getEtag());
+    private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder,
+            GcsObjectMeta meta, String etag) {
+        addHeaderIfPresent(builder, "ETag", etag);
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
         addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
         addHeaderIfPresent(builder, "x-goog-stored-content-length", meta.getSize());

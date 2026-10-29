@@ -706,12 +706,10 @@ public class GcsService {
                 requireOverwritePermission(bucket, objectName, requireOverwritePermission);
                 checkPreconditions(bucket, objectName, preconditions);
                 return putObjectLocked(bucket, objectName, contentType, data, customerEncryption,
-                        userMetadata, metadataTemplate, baseUrl, ObjectWriteMode.ORDINARY, null);
+                        userMetadata, metadataTemplate, baseUrl, null, null);
             }
         }
     }
-
-    private enum ObjectWriteMode { ORDINARY, XML_MULTIPART }
 
     private void requireOverwritePermission(String bucket, String objectName,
             Runnable requireOverwritePermission) {
@@ -720,9 +718,14 @@ public class GcsService {
         }
     }
 
+    /**
+     * Writes the object under the caller's locks. {@code xmlMultipartEtag} is the entity tag an
+     * XML multipart completion computed from its parts; an ordinary write passes null and gets
+     * the MD5 of the whole object. {@code compositeComponentCount} is set by compose only.
+     */
     private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
-            GcsObjectMeta metadataTemplate, String baseUrl, ObjectWriteMode mode, Integer compositeComponentCount) {
+            GcsObjectMeta metadataTemplate, String baseUrl, String xmlMultipartEtag, Integer compositeComponentCount) {
         LOG.debugf("putObject bucket=%s name=%s contentType=%s size=%d", bucket, objectName, contentType, data.length);
         GcsBucket b = bucketStore.get(bucket).orElse(null);
         if (b == null) {
@@ -782,8 +785,8 @@ public class GcsService {
         meta.setIsLatest(true);
         String crc32c = computeCrc32c(data);
         meta.setCrc32c(crc32c);
-        if (mode == ObjectWriteMode.XML_MULTIPART) {
-            meta.setEtag(Base64.getEncoder().encodeToString(meta.getGeneration().getBytes(StandardCharsets.UTF_8)));
+        if (xmlMultipartEtag != null) {
+            meta.setEtag(xmlMultipartEtag);
         } else {
             String md5 = computeMd5(data);
             meta.setMd5Hash(md5);
@@ -847,13 +850,14 @@ public class GcsService {
     }
 
     public GcsObjectMeta putXmlMultipartObject(String bucket, String objectName, String contentType,
-            byte[] data, Map<String, String> metadata, String baseUrl, Runnable requireOverwritePermission) {
+            byte[] data, String etag, Map<String, String> metadata, String baseUrl,
+            Runnable requireOverwritePermission) {
         synchronized (bucketLock(bucket)) {
             synchronized (objectLock(bucket, objectName)) {
                 requireOverwritePermission(bucket, objectName, requireOverwritePermission);
                 checkPreconditions(bucket, objectName, GcsObjectPreconditions.NONE);
                 GcsObjectMeta result = putObjectLocked(bucket, objectName, contentType, data,
-                        GcsCustomerEncryption.none(), metadata, null, baseUrl, ObjectWriteMode.XML_MULTIPART, null);
+                        GcsCustomerEncryption.none(), metadata, null, baseUrl, etag, null);
                 objectDataStore.checkpoint();
                 objectMetaStore.checkpoint();
                 return result;
@@ -1567,7 +1571,7 @@ public class GcsService {
                         resolvedType != null ? resolvedType : "application/octet-stream",
                         composed, GcsCustomerEncryption.none(),
                         metadataTemplate != null ? metadataTemplate.getMetadata() : null,
-                        metadataTemplate, baseUrl, ObjectWriteMode.ORDINARY, componentCount);
+                        metadataTemplate, baseUrl, null, componentCount);
             }
         }
     }
@@ -1796,7 +1800,7 @@ public class GcsService {
             GcsObjectMeta destinationTemplate, String baseUrl) {
         GcsObjectMeta srcMeta = src.meta();
         GcsObjectMeta dstMeta = putObjectLocked(dstBucket, dstObject, srcMeta.getContentType(), src.data(),
-                GcsCustomerEncryption.none(), null, destinationTemplate, baseUrl, ObjectWriteMode.ORDINARY, null);
+                GcsCustomerEncryption.none(), null, destinationTemplate, baseUrl, null, null);
         if (srcMeta.getMetadata() != null) {
             dstMeta.setMetadata(new LinkedHashMap<>(srcMeta.getMetadata()));
         }

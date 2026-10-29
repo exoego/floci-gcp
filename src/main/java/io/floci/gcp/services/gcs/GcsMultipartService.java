@@ -65,6 +65,7 @@ public class GcsMultipartService {
             if (requested.isEmpty() || requested.size() > 10000) { throw GcpException.invalidArgument("A part list is required").withReason("MalformedXML"); }
             int previous = 0;
             ByteArrayOutputStream data = new ByteArrayOutputStream();
+            ByteArrayOutputStream partDigests = new ByteArrayOutputStream();
             for (int i = 0; i < requested.size(); i++) {
                 Map<String,String> item = requested.get(i);
                 int number;
@@ -76,9 +77,13 @@ public class GcsMultipartService {
                 if (part == null || !part.etag().equals(item.get("ETag"))) { throw GcpException.invalidArgument("Missing part or mismatched ETag").withReason("InvalidPart"); }
                 if (i < requested.size() - 1 && part.data().length < 5 * 1024 * 1024) { throw GcpException.invalidArgument("Non-final parts must contain at least 5 MiB").withReason("InvalidArgument"); }
                 data.writeBytes(part.data());
+                partDigests.writeBytes(HexFormat.of().parseHex(part.etag().replace("\"", "")));
             }
+            // GCS writes the ETag of a multipart object the way S3 does: the MD5 of the part
+            // digests in hex, a dash and the part count.
+            String etag = HexFormat.of().formatHex(md5(partDigests.toByteArray())) + "-" + requested.size();
             GcsObjectMeta meta = gcs.putXmlMultipartObject(bucket, object, upload.contentType,
-                    data.toByteArray(), upload.metadata, baseUrl, requireOverwritePermission);
+                    data.toByteArray(), etag, upload.metadata, baseUrl, requireOverwritePermission);
             uploads.delete(id); uploads.checkpoint(); return meta;
         });
     }

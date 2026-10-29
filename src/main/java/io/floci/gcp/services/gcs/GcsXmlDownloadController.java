@@ -102,7 +102,7 @@ public class GcsXmlDownloadController {
         GcsCustomerEncryption customerEncryption = GcsCustomerEncryption.fromKeySha256(customerEncryptionKeySha256);
         GcsObjectDownload download = service.getObjectForDownload(bucket, objectPath, generation, customerEncryption);
         return GcsMediaResponses.withResponseOverrides(
-                GcsMediaResponses.mediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding),
+                GcsMediaResponses.xmlMediaResponse(download.data(), download.meta(), rangeHeader, acceptEncoding),
                 uriInfo.getQueryParameters());
     }
 
@@ -244,7 +244,7 @@ public class GcsXmlDownloadController {
                     .elem("Generation", meta.getGeneration())
                     .elem("MetaGeneration", meta.getMetageneration())
                     .elem("LastModified", meta.getUpdated())
-                    .elem("ETag", meta.getEtag())
+                    .elem("ETag", GcsMediaResponses.xmlEtag(meta))
                     .elem("Size", meta.getSize())
                     .elem("StorageClass", meta.getStorageClass())
                     .end("Contents");

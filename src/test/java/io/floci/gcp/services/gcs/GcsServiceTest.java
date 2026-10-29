@@ -1253,7 +1253,7 @@ class GcsServiceTest {
             case UPLOAD -> service.putObject("bucket", "obj.txt", "text/plain", new byte[]{2},
                     GcsCustomerEncryption.none(), BASE_URL);
             case XML_MULTIPART -> service.putXmlMultipartObject("bucket", "obj.txt", "text/plain",
-                    new byte[]{2}, Map.of(), BASE_URL, null);
+                    new byte[]{2}, "28c8edde3d61a0411511d3b1866f0636-1", Map.of(), BASE_URL, null);
             case COMPOSE -> service.composeObject("bucket", "obj.txt", List.of("src.txt"),
                     "text/plain", BASE_URL);
             case COPY -> service.copyObject("bucket", "src.txt", "bucket", "obj.txt",

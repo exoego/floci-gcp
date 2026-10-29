@@ -439,8 +439,9 @@ uploads do not appear in ordinary object inventory.
 
 Part numbers range from 1 to 10000. Completion validates increasing order, ETags
 and the 5 MiB minimum for every non-final part. Retrying a part replaces that part;
-a failed completion preserves the session. Completed objects have CRC32C and an
-opaque ETag, but no MD5 hash. Multipart upload delimiter grouping, customer-supplied
+a failed completion preserves the session. Completed objects have CRC32C and the
+ETag GCS writes for a multipart upload (the MD5 of the part digests in hex, a dash
+and the part count), but no MD5 hash. Multipart upload delimiter grouping, customer-supplied
 encryption, upload preconditions and lifecycle expiry of incomplete sessions are
 unsupported. The emulator buffers parts and completed bytes in memory. Object
 publication and session removal are separate checkpoints; crash-atomic completion
@@ -453,10 +454,19 @@ authenticator. Signed URL expiry checks do not prove cryptographic signature
 enforcement. The SDK suite uses only synthetic credentials and fixture signing keys.
 
 Multipart object metadata is finalized before storage publication and Pub/Sub or
-Eventarc finalization events. The event and stored generation agree on the opaque
+Eventarc finalization events. The event and stored generation agree on the
 ETag, CRC32C, content metadata and absence of MD5. Ordinary uploads continue to
 include their MD5. Object publication and multipart-session removal still use
 separate checkpoints; crash-atomic multipart completion is not guaranteed.
+
+## XML API entity tags
+
+The XML API writes the `ETag` header of PUT, GET and HEAD, the `ETag` element of
+ListObjects and the result of a multipart completion the way GCS does, in quotes.
+An object with an MD5 carries that MD5 in hex. A multipart upload carries the MD5
+of its part digests, a dash and the part count. A composite object, which has no
+MD5, carries a dash followed by its resource etag. The JSON API, including
+`alt=media` downloads, keeps the resource `etag` of the object.
 
 ## XML API error responses
 
