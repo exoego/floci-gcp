@@ -83,9 +83,10 @@ public class GcsXmlMultipartHandler {
                 String base = RequestBaseUrl.resolve(uri, headers, config.baseUrl(), config.port());
                 GcsObjectMeta meta = service.complete(
                         bucket, object, id, requested, base, requireOverwritePermission);
+                String etag = GcsMediaResponses.xmlEtag(meta);
                 return Response.ok(new XmlBuilder().start("CompleteMultipartUploadResult", NS).elem("Location", meta.getMediaLink())
-                        .elem("Bucket", bucket).elem("Key", object).elem("ETag", GcsMediaResponses.xmlEtag(meta)).end("CompleteMultipartUploadResult").build(), MediaType.APPLICATION_XML)
-                        .header("ETag", GcsMediaResponses.xmlEtag(meta)).header("x-goog-generation", meta.getGeneration())
+                        .elem("Bucket", bucket).elem("Key", object).elem("ETag", etag).end("CompleteMultipartUploadResult").build(), MediaType.APPLICATION_XML)
+                        .header("ETag", etag).header("x-goog-generation", meta.getGeneration())
                         .header("x-goog-hash", "crc32c=" + meta.getCrc32c()).build();
             }));
             case "DELETE" -> xmlAuthorization.call(authorization, () -> authorizationService.authorizeMultipartAbort(

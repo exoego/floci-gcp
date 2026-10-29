@@ -114,6 +114,25 @@ class GcsXmlEtagRestIntegrationTest {
         assertXmlEtag("two-parts.bin", "\"f1532f7e30ab306902f68a0323248750-2\"");
     }
 
+    @Test
+    void completionAcceptsAPartReceiptWithoutItsQuotes() {
+        String path = "/" + bucket + "/unquoted.bin";
+        String uploadId = initiate(path);
+        given().body("hello world\n".getBytes(StandardCharsets.UTF_8))
+                .put(path + "?uploadId=" + uploadId + "&partNumber=1")
+                .then().statusCode(200)
+                .header("ETag", equalTo(PLAIN_ETAG));
+
+        given().contentType("application/xml")
+                .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"
+                        + PLAIN_ETAG.replace("\"", "") + "</ETag></Part></CompleteMultipartUpload>")
+                .post(path + "?uploadId=" + uploadId)
+                .then().statusCode(200)
+                .header("ETag", equalTo("\"8d780cfbcd9622aa77011564e615065f-1\""));
+
+        assertXmlEtag("unquoted.bin", "\"8d780cfbcd9622aa77011564e615065f-1\"");
+    }
+
     private String initiate(String path) {
         return given().post(path + "?uploads").then().statusCode(200)
                 .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
@@ -125,7 +144,6 @@ class GcsXmlEtagRestIntegrationTest {
                 .then().statusCode(200);
     }
 
-    // GET, HEAD and ListObjects name the same entity tag, and GET sends it once.
     private void assertXmlEtag(String name, String expected) {
         Response get = given().when().get("/{bucket}/{object}", bucket, name);
         get.then().statusCode(200).header("ETag", equalTo(expected));

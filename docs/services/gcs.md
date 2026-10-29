@@ -439,13 +439,13 @@ uploads do not appear in ordinary object inventory.
 
 Part numbers range from 1 to 10000. Completion validates increasing order, ETags
 and the 5 MiB minimum for every non-final part. Retrying a part replaces that part;
-a failed completion preserves the session. Completed objects have CRC32C and the
-ETag GCS writes for a multipart upload (the MD5 of the part digests in hex, a dash
-and the part count), but no MD5 hash. Multipart upload delimiter grouping, customer-supplied
-encryption, upload preconditions and lifecycle expiry of incomplete sessions are
-unsupported. The emulator buffers parts and completed bytes in memory. Object
-publication and session removal are separate checkpoints; crash-atomic completion
-across those stores is not guaranteed.
+a failed completion preserves the session. A part receipt in the completion is accepted
+with or without its quotes. Completed objects have CRC32C and the multipart ETag described
+under [XML API entity tags](#xml-api-entity-tags), but no MD5 hash. Multipart upload
+delimiter grouping, customer-supplied encryption, upload preconditions and lifecycle
+expiry of incomplete sessions are unsupported. The emulator buffers parts and completed
+bytes in memory. Object publication and session removal are separate checkpoints;
+crash-atomic completion across those stores is not guaranteed.
 
 Authentication retains the existing emulator credential acceptance and CAB checks.
 In IAM `enforce` mode, every XML multipart request also evaluates its documented

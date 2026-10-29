@@ -55,6 +55,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -719,9 +720,9 @@ public class GcsService {
     }
 
     /**
-     * Writes the object under the caller's locks. {@code xmlMultipartEtag} is the entity tag an
-     * XML multipart completion computed from its parts; an ordinary write passes null and gets
-     * the MD5 of the whole object. {@code compositeComponentCount} is set by compose only.
+     * Writes the object under the caller's locks. An XML multipart completion passes the entity
+     * tag it computed from its parts as {@code xmlMultipartEtag}. Compose passes
+     * {@code compositeComponentCount}.
      */
     private GcsObjectMeta putObjectLocked(String bucket, String objectName, String contentType, byte[] data,
             GcsCustomerEncryption customerEncryption, Map<String, String> userMetadata,
@@ -852,6 +853,7 @@ public class GcsService {
     public GcsObjectMeta putXmlMultipartObject(String bucket, String objectName, String contentType,
             byte[] data, String etag, Map<String, String> metadata, String baseUrl,
             Runnable requireOverwritePermission) {
+        Objects.requireNonNull(etag, "etag");
         synchronized (bucketLock(bucket)) {
             synchronized (objectLock(bucket, objectName)) {
                 requireOverwritePermission(bucket, objectName, requireOverwritePermission);

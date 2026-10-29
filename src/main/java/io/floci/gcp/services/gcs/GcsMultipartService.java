@@ -65,7 +65,7 @@ public class GcsMultipartService {
             if (requested.isEmpty() || requested.size() > 10000) { throw GcpException.invalidArgument("A part list is required").withReason("MalformedXML"); }
             int previous = 0;
             ByteArrayOutputStream data = new ByteArrayOutputStream();
-            ByteArrayOutputStream partDigests = new ByteArrayOutputStream();
+            MessageDigest partDigests = md5Digest();
             for (int i = 0; i < requested.size(); i++) {
                 Map<String,String> item = requested.get(i);
                 int number;
@@ -74,14 +74,13 @@ public class GcsMultipartService {
                 if (number <= previous) { throw GcpException.invalidArgument("Parts must be in increasing order").withReason("InvalidPartOrder"); }
                 previous = number;
                 GcsMultipartUpload.Part part = upload.parts.get(number);
-                if (part == null || !part.etag().equals(item.get("ETag"))) { throw GcpException.invalidArgument("Missing part or mismatched ETag").withReason("InvalidPart"); }
+                if (part == null || !unquoted(part.etag()).equals(unquoted(item.get("ETag")))) { throw GcpException.invalidArgument("Missing part or mismatched ETag").withReason("InvalidPart"); }
                 if (i < requested.size() - 1 && part.data().length < 5 * 1024 * 1024) { throw GcpException.invalidArgument("Non-final parts must contain at least 5 MiB").withReason("InvalidArgument"); }
                 data.writeBytes(part.data());
-                partDigests.writeBytes(HexFormat.of().parseHex(part.etag().replace("\"", "")));
+                partDigests.update(HexFormat.of().parseHex(unquoted(part.etag())));
             }
-            // GCS writes the ETag of a multipart object the way S3 does: the MD5 of the part
-            // digests in hex, a dash and the part count.
-            String etag = HexFormat.of().formatHex(md5(partDigests.toByteArray())) + "-" + requested.size();
+            // GCS writes the ETag of a multipart object the way S3 does.
+            String etag = HexFormat.of().formatHex(partDigests.digest()) + "-" + requested.size();
             GcsObjectMeta meta = gcs.putXmlMultipartObject(bucket, object, upload.contentType,
                     data.toByteArray(), etag, upload.metadata, baseUrl, requireOverwritePermission);
             uploads.delete(id); uploads.checkpoint(); return meta;
@@ -105,8 +104,11 @@ public class GcsMultipartService {
                 .filter(part -> part.number() > marker)
                 .sorted(Comparator.comparingInt(GcsMultipartUpload.Part::number)).toList());
     }
-    private static byte[] md5(byte[] data) {
-        try { return MessageDigest.getInstance("MD5").digest(data); }
+    // GCS accepts a part receipt with or without its quotes (probed live on 2026-10-29).
+    private static String unquoted(String etag) { return etag == null ? null : etag.replace("\"", ""); }
+    private static byte[] md5(byte[] data) { return md5Digest().digest(data); }
+    private static MessageDigest md5Digest() {
+        try { return MessageDigest.getInstance("MD5"); }
         catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
     }
 }

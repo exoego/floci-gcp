@@ -22,10 +22,6 @@ final class GcsMediaResponses {
 
     private GcsMediaResponses() {}
 
-    static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader) {
-        return mediaResponse(data, meta, rangeHeader, null);
-    }
-
     /**
      * Builds a media response, applying decompressive transcoding when it applies.
      *
@@ -39,7 +35,6 @@ final class GcsMediaResponses {
         return mediaResponse(data, meta, rangeHeader, acceptEncoding, meta.getEtag());
     }
 
-    /** The XML API download, which names the object by its XML entity tag, not the resource etag. */
     static Response xmlMediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
             String acceptEncoding) {
         return mediaResponse(data, meta, rangeHeader, acceptEncoding, xmlEtag(meta));
@@ -209,6 +204,7 @@ final class GcsMediaResponses {
         if (meta.getComponentCount() != null) {
             return "\"-" + meta.getEtag() + "\"";
         }
+        // A multipart object stored by an older emulator carries a generation-based etag here.
         return "\"" + meta.getEtag() + "\"";
     }
 
