@@ -76,8 +76,7 @@ class GcsXmlEtagRestIntegrationTest {
                 .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + partEtag
                         + "</ETag></Part></CompleteMultipartUpload>")
                 .post(path + "?uploadId=" + uploadId);
-        completed.then().statusCode(200)
-                .header("ETag", equalTo("\"8d780cfbcd9622aa77011564e615065f-1\""));
+        completed.then().statusCode(200).header("ETag", nullValue());
         assertEquals("\"8d780cfbcd9622aa77011564e615065f-1\"",
                 completed.xmlPath().getString("CompleteMultipartUploadResult.ETag"));
 
@@ -103,13 +102,14 @@ class GcsXmlEtagRestIntegrationTest {
                 .header("ETag", equalTo("\"7aea2552dfe7eb84b9443b6fc9ba6e01\""))
                 .extract().header("ETag");
 
-        given().contentType("application/xml")
+        String completedEtag = given().contentType("application/xml")
                 .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + firstEtag
                         + "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" + lastEtag
                         + "</ETag></Part></CompleteMultipartUpload>")
                 .post(path + "?uploadId=" + uploadId)
                 .then().statusCode(200)
-                .header("ETag", equalTo("\"f1532f7e30ab306902f68a0323248750-2\""));
+                .extract().xmlPath().getString("CompleteMultipartUploadResult.ETag");
+        assertEquals("\"f1532f7e30ab306902f68a0323248750-2\"", completedEtag);
 
         assertXmlEtag("two-parts.bin", "\"f1532f7e30ab306902f68a0323248750-2\"");
     }
@@ -123,12 +123,13 @@ class GcsXmlEtagRestIntegrationTest {
                 .then().statusCode(200)
                 .header("ETag", equalTo(PLAIN_ETAG));
 
-        given().contentType("application/xml")
+        String completedEtag = given().contentType("application/xml")
                 .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"
                         + PLAIN_ETAG.replace("\"", "") + "</ETag></Part></CompleteMultipartUpload>")
                 .post(path + "?uploadId=" + uploadId)
                 .then().statusCode(200)
-                .header("ETag", equalTo("\"8d780cfbcd9622aa77011564e615065f-1\""));
+                .extract().xmlPath().getString("CompleteMultipartUploadResult.ETag");
+        assertEquals("\"8d780cfbcd9622aa77011564e615065f-1\"", completedEtag);
 
         assertXmlEtag("unquoted.bin", "\"8d780cfbcd9622aa77011564e615065f-1\"");
     }

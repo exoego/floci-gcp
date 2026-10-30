@@ -74,7 +74,7 @@ public class GcsMultipartService {
                 if (number <= previous) { throw GcpException.invalidArgument("Parts must be in increasing order").withReason("InvalidPartOrder"); }
                 previous = number;
                 GcsMultipartUpload.Part part = upload.parts.get(number);
-                if (part == null || !unquoted(part.etag()).equals(unquoted(item.get("ETag")))) { throw GcpException.invalidArgument("Missing part or mismatched ETag").withReason("InvalidPart"); }
+                if (part == null || !unquoted(part.etag()).equals(unquoted(item.get("ETag")))) { throw GcpException.notFound("The requested upload part was not found.").withReason("NoSuchPart"); }
                 if (i < requested.size() - 1 && part.data().length < 5 * 1024 * 1024) { throw GcpException.invalidArgument("Non-final parts must contain at least 5 MiB").withReason("InvalidArgument"); }
                 data.writeBytes(part.data());
                 partDigests.update(HexFormat.of().parseHex(unquoted(part.etag())));

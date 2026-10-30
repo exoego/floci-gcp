@@ -16,17 +16,22 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /** Shares the XML object routes with ordinary transfers, dispatched by native query parameters. */
 @ApplicationScoped
 public class GcsXmlMultipartHandler {
     private static final String NS = "http://s3.amazonaws.com/doc/2006-03-01/";
+    // GCS answers a completion as text/html (probed live on 2026-10-30).
+    private static final String COMPLETION_TYPE = "text/html; charset=UTF-8";
     private final GcsXmlAuthorization xmlAuthorization;
     private final GcsMultipartService service;
     private final GcsIamAuthorizationService authorizationService;
@@ -83,11 +88,14 @@ public class GcsXmlMultipartHandler {
                 String base = RequestBaseUrl.resolve(uri, headers, config.baseUrl(), config.port());
                 GcsObjectMeta meta = service.complete(
                         bucket, object, id, requested, base, requireOverwritePermission);
-                String etag = GcsMediaResponses.xmlEtag(meta);
-                return Response.ok(new XmlBuilder().start("CompleteMultipartUploadResult", NS).elem("Location", meta.getMediaLink())
-                        .elem("Bucket", bucket).elem("Key", object).elem("ETag", etag).end("CompleteMultipartUploadResult").build(), MediaType.APPLICATION_XML)
-                        .header("ETag", etag).header("x-goog-generation", meta.getGeneration())
-                        .header("x-goog-hash", "crc32c=" + meta.getCrc32c()).build();
+                String location = base + "/" + bucket + "/" + locationPath(object);
+                return Response.ok(new XmlBuilder().start("CompleteMultipartUploadResult", NS).elem("Location", location)
+                        .elem("Bucket", bucket).elem("Key", object).elem("ETag", GcsMediaResponses.xmlEtag(meta))
+                        .end("CompleteMultipartUploadResult").build(), COMPLETION_TYPE)
+                        .header("x-goog-stored-content-length", meta.getSize())
+                        .header("x-goog-hash", "crc32c=" + meta.getCrc32c())
+                        .header("x-goog-generation", meta.getGeneration())
+                        .header("x-goog-metageneration", meta.getMetageneration()).build();
             }));
             case "DELETE" -> xmlAuthorization.call(authorization, () -> authorizationService.authorizeMultipartAbort(
                     authorization, bucket, object, () -> {
@@ -112,6 +120,12 @@ public class GcsXmlMultipartHandler {
             }
             default -> throw GcpException.unimplemented("Unsupported multipart method");
         };
+    }
+    // GCS form-encodes each segment of the key in Location, so a space becomes a plus (probed live on 2026-10-30).
+    private static String locationPath(String object) {
+        return Arrays.stream(object.split("/", -1))
+                .map(segment -> URLEncoder.encode(segment, StandardCharsets.UTF_8))
+                .collect(Collectors.joining("/"));
     }
     private static void rejectUnsupportedHeaders(HttpHeaders headers) {
         for (String header : headers.getRequestHeaders().keySet()) {

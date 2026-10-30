@@ -15,7 +15,7 @@ final class GcsXmlErrorResponse {
 
     private static final Logger LOG = Logger.getLogger(GcsXmlErrorResponse.class);
     private static final Set<String> MULTIPART_CODES = Set.of(
-            "NoSuchUpload", "BadDigest", "MalformedXML", "InvalidPart", "InvalidPartOrder", "InvalidArgument");
+            "NoSuchUpload", "NoSuchPart", "BadDigest", "MalformedXML", "InvalidPart", "InvalidPartOrder", "InvalidArgument");
 
     private GcsXmlErrorResponse() {
     }

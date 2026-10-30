@@ -1,6 +1,7 @@
 package io.floci.gcp.services.gcs;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 import java.util.UUID;
 import static io.restassured.RestAssured.given;
@@ -41,7 +42,8 @@ class GcsXmlMultipartIntegrationTest {
         String id = initiate(path);
         String etag = given().body("bytes").put(path + "?uploadId=" + id + "&partNumber=1").then().statusCode(200).extract().header("ETag");
         given().contentType("application/xml").body("<CompleteMultipartUpload><Part>").post(path + "?uploadId=" + id).then().statusCode(400);
-        given().contentType("application/xml").body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>wrong</ETag></Part></CompleteMultipartUpload>").post(path + "?uploadId=" + id).then().statusCode(400);
+        assertEquals("NoSuchPart", given().contentType("application/xml").body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>wrong</ETag></Part></CompleteMultipartUpload>").post(path + "?uploadId=" + id).then().statusCode(404).extract().xmlPath().getString("Error.Code"));
+        assertEquals("NoSuchPart", given().contentType("application/xml").body("<CompleteMultipartUpload><Part><PartNumber>2</PartNumber><ETag>" + etag + "</ETag></Part></CompleteMultipartUpload>").post(path + "?uploadId=" + id).then().statusCode(404).extract().xmlPath().getString("Error.Code"));
         given().body("bad").put("/" + bucket + "/different?uploadId=" + id + "&partNumber=1").then().statusCode(404);
         given().header("Content-MD5", "not-a-checksum").body("bad").put(path + "?uploadId=" + id + "&partNumber=1").then().statusCode(400);
         assertEquals(etag, given().get(path + "?uploadId=" + id).xmlPath().getString("ListPartsResult.Part.ETag"));
@@ -64,6 +66,31 @@ class GcsXmlMultipartIntegrationTest {
         var metadata = given().get("/storage/v1/b/" + bucket + "/o/checksums").jsonPath();
         assertEquals("4waSgw==", metadata.getString("crc32c"));
         assertNull(metadata.get("md5Hash"));
+    }
+
+    @Test void completionAnswersWithTheGcsHeadersAndLocation() {
+        String bucket = bucket(), path = "/" + bucket + "/sp%20ace%2Bplus.bin";
+        String id = given().urlEncodingEnabled(false).post(path + "?uploads").then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String etag = given().urlEncodingEnabled(false).body("123456789").put(path + "?uploadId=" + id + "&partNumber=1")
+                .then().statusCode(200).extract().header("ETag");
+        Response completed = given().urlEncodingEnabled(false).contentType("application/xml")
+                .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + etag + "</ETag></Part></CompleteMultipartUpload>")
+                .post(path + "?uploadId=" + id).then().statusCode(200).extract().response();
+        // The shape GCS sent on 2026-10-30: no ETag header, text/html, and the form-encoded key in Location.
+        assertTrue(completed.contentType().startsWith("text/html"), completed.contentType());
+        assertNull(completed.header("ETag"));
+        assertEquals("9", completed.header("x-goog-stored-content-length"));
+        assertEquals("1", completed.header("x-goog-metageneration"));
+        String generation = given().urlEncodingEnabled(false).get("/storage/v1/b/" + bucket + "/o/sp%20ace%2Bplus.bin")
+                .then().statusCode(200).extract().jsonPath().getString("generation");
+        assertEquals(generation, completed.header("x-goog-generation"));
+        assertEquals(bucket, completed.xmlPath().getString("CompleteMultipartUploadResult.Bucket"));
+        assertEquals("sp ace+plus.bin", completed.xmlPath().getString("CompleteMultipartUploadResult.Key"));
+        String location = completed.xmlPath().getString("CompleteMultipartUploadResult.Location");
+        assertTrue(location.startsWith("http://"), location);
+        assertTrue(location.endsWith("/" + bucket + "/sp+ace%2Bplus.bin"), location);
+        assertEquals("123456789", given().urlEncodingEnabled(false).get(path).then().statusCode(200).extract().asString());
     }
 
     @Test void undersizedNonFinalPartReturnsInvalidArgumentAndPreservesUpload() {

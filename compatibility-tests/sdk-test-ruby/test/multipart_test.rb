@@ -55,7 +55,7 @@ class MultipartContractTest < Minitest::Test
     assert_nil @bucket.file(@key)
     part = ->(n, token) { "<Part><PartNumber>#{n}</PartNumber><ETag>#{CGI.escapeHTML(token)}</ETag></Part>" }
     bad = request("POST", {"uploadId" => id}, "<CompleteMultipartUpload>#{part.call(1, 'wrong')}</CompleteMultipartUpload>")
-    assert_equal "400", bad.code
+    assert_equal "404", bad.code, bad.body
     complete = request("POST", {"uploadId" => id}, "<CompleteMultipartUpload>#{part.call(1, first['etag'])}#{part.call(2, tail['etag'])}</CompleteMultipartUpload>")
     assert_equal "200", complete.code, complete.body
     @uploads.delete(id)

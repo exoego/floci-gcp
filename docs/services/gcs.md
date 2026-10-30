@@ -440,12 +440,17 @@ uploads do not appear in ordinary object inventory.
 Part numbers range from 1 to 10000. Completion validates increasing order, ETags
 and the 5 MiB minimum for every non-final part. Retrying a part replaces that part;
 a failed completion preserves the session. A part receipt in the completion is accepted
-with or without its quotes. Completed objects have CRC32C and the multipart ETag described
-under [XML API entity tags](#xml-api-entity-tags), but no MD5 hash. Multipart upload
-delimiter grouping, customer-supplied encryption, upload preconditions and lifecycle
-expiry of incomplete sessions are unsupported. The emulator buffers parts and completed
-bytes in memory. Object publication and session removal are separate checkpoints;
-crash-atomic completion across those stores is not guaranteed.
+with or without its quotes. A receipt that names a part that was not uploaded, or a
+wrong ETag, returns HTTP 404 `NoSuchPart`. The completion result is sent the way GCS
+sends it: as `text/html`, with the ETag in the body only, a `Location` that is the XML
+URL of the object, and the `x-goog-stored-content-length`, `x-goog-hash`,
+`x-goog-generation` and `x-goog-metageneration` headers. Completed objects have CRC32C
+and the multipart ETag described under [XML API entity tags](#xml-api-entity-tags),
+but no MD5 hash. Multipart upload delimiter grouping, customer-supplied encryption,
+upload preconditions and lifecycle expiry of incomplete sessions are unsupported. The
+emulator buffers parts and completed bytes in memory. Object publication and session
+removal are separate checkpoints; crash-atomic completion across those stores is not
+guaranteed.
 
 Authentication retains the existing emulator credential acceptance and CAB checks.
 In IAM `enforce` mode, every XML multipart request also evaluates its documented
@@ -474,8 +479,9 @@ Failures from supported XML object transfers, listings, and multipart operations
 `application/xml` with an `Error` root, a machine-readable `Code`, and a `Message`.
 This does not depend on the request's `Accept` header. Missing buckets, objects
 (including generations), and multipart uploads return distinct `NoSuchBucket`,
-`NoSuchKey`, and `NoSuchUpload` codes with HTTP 404. Multipart receipt and checksum
-errors retain their specific codes. Signed URL errors retain their optional
+`NoSuchKey`, and `NoSuchUpload` codes with HTTP 404. A completion that names an unknown
+part or a wrong part ETag returns `NoSuchPart` with HTTP 404. Other multipart receipt
+and checksum errors retain their specific codes. Signed URL errors retain their optional
 `Details` and `ParameterName` fields.
 
 Anonymous permission denial returns HTTP 403 `AccessDenied`. A denied request
