@@ -473,6 +473,31 @@ of its part digests, a dash and the part count. A composite object, which has no
 MD5, carries a dash followed by its resource etag. The JSON API, including
 `alt=media` downloads, keeps the resource `etag` of the object.
 
+## XML API object listing
+
+`GET /{bucket}` answers with `ListBucketResult` the way GCS does. Without `list-type`, or
+with any value other than `2`, the result has the version 1 shape: `Name`, `Prefix`, `Marker`,
+`NextMarker` when the page is truncated, `MaxKeys` when `max-keys` was sent, `Delimiter`
+when `delimiter` was sent, `IsTruncated`, then every `Contents` entry and then every
+`CommonPrefixes` entry. `list-type=2` replaces `Marker` and `NextMarker` with `StartAfter`,
+`ContinuationToken` and `NextContinuationToken`, and adds `KeyCount`, the number of
+`Contents` entries on the page. A `continuation-token` wins over `start-after`. A `marker`
+sent with `list-type=2` returns HTTP 400 `NotImplemented`. A token the emulator did not issue
+returns HTTP 400 `InvalidArgument`.
+
+A page holds at most `max-keys` entries, objects and common prefixes together, in name
+order. `max-keys=0` returns an empty page that is not truncated. A negative `max-keys` is
+ignored, and a value that is not a number returns HTTP 400 `InvalidArgument`. Without
+`max-keys` the emulator returns every entry on one page.
+
+Each `Contents` entry carries `Key`, `Generation`, `MetaGeneration`, `LastModified`, `ETag`
+and `Size`. `encoding-type=url` URL-encodes `Prefix`, `Marker`, `NextMarker`, `StartAfter`,
+`Delimiter`, every `Key` and every common prefix the way GCS does: a space becomes `+`, the
+characters `! $ ' ( ) * , ; : @ / ?` stay as they are, and everything else outside letters,
+digits, `-`, `.`, `_` and `~` becomes a percent escape. The result then carries
+`Encoding-Type` in version 1 and `EncodingType` in version 2. The response carries the bucket
+metageneration in `x-goog-metageneration`. The `versions` listing is not supported over XML.
+
 ## XML API error responses
 
 Failures from supported XML object transfers, listings, and multipart operations use

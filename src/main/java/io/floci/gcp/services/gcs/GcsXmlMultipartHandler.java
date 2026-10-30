@@ -16,15 +16,12 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 /** Shares the XML object routes with ordinary transfers, dispatched by native query parameters. */
 @ApplicationScoped
@@ -88,7 +85,7 @@ public class GcsXmlMultipartHandler {
                 String base = RequestBaseUrl.resolve(uri, headers, config.baseUrl(), config.port());
                 GcsObjectMeta meta = service.complete(
                         bucket, object, id, requested, base, requireOverwritePermission);
-                String location = base + "/" + bucket + "/" + locationPath(object);
+                String location = base + "/" + bucket + "/" + GcsXmlUrlEncoding.encode(object);
                 return Response.ok(new XmlBuilder().start("CompleteMultipartUploadResult", NS).elem("Location", location)
                         .elem("Bucket", bucket).elem("Key", object).elem("ETag", GcsMediaResponses.xmlEtag(meta))
                         .end("CompleteMultipartUploadResult").build(), COMPLETION_TYPE)
@@ -120,12 +117,6 @@ public class GcsXmlMultipartHandler {
             }
             default -> throw GcpException.unimplemented("Unsupported multipart method");
         };
-    }
-    // GCS form-encodes each segment of the key in Location, so a space becomes a plus (probed live on 2026-10-30).
-    private static String locationPath(String object) {
-        return Arrays.stream(object.split("/", -1))
-                .map(segment -> URLEncoder.encode(segment, StandardCharsets.UTF_8))
-                .collect(Collectors.joining("/"));
     }
     private static void rejectUnsupportedHeaders(HttpHeaders headers) {
         for (String header : headers.getRequestHeaders().keySet()) {

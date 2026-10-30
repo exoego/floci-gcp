@@ -3,7 +3,7 @@ package io.floci.gcp.services.gcs;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.RequestBaseUrl;
-import io.floci.gcp.core.common.XmlBuilder;
+import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
@@ -28,14 +28,9 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -152,10 +147,8 @@ public class GcsXmlDownloadController {
     }
 
     /**
-     * XML API ListObjects: {@code GET /{bucket}}, answering with {@code ListBucketResult}.
-     *
-     * <p>Emits the v1 shape (Contents/CommonPrefixes/Marker), which is what GCS serves by default
-     * and what S3-compatible clients expect.
+     * XML API ListObjects: {@code GET /{bucket}}, answering with {@code ListBucketResult} in
+     * the list-type 1 shape, or the list-type 2 shape when {@code list-type=2} is sent.
      */
     @GET
     @Produces(MediaType.APPLICATION_XML)
@@ -165,92 +158,19 @@ public class GcsXmlDownloadController {
             @Context HttpHeaders headers,
             @QueryParam("prefix") String prefix,
             @QueryParam("delimiter") String delimiter,
-            @QueryParam("max-keys") Integer maxKeys,
+            @QueryParam("max-keys") String maxKeys,
             @QueryParam("marker") String marker,
+            @QueryParam("list-type") String listType,
+            @QueryParam("start-after") String startAfter,
+            @QueryParam("continuation-token") String continuationToken,
+            @QueryParam("encoding-type") String encodingType,
             @HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, null, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
         xmlAuthorization.require(authorization, () -> iamAuthorizationService.requireObjectList(authorization, bucket, prefix));
-        service.getBucket(bucket);
-
-        // "The object name after which you want to start listing objects. Objects whose names
-        // are lexicographically greater than the marker are returned in the list of objects."
-        // Without this a client that sees IsTruncated and re-requests gets the same first page
-        // forever, so pagination never terminates.
-        List<GcsObjectMeta> all = service.listObjects(bucket).stream()
-                .filter(o -> prefix == null || prefix.isEmpty() || o.getName().startsWith(prefix))
-                .sorted(Comparator.comparing(GcsObjectMeta::getName))
-                .toList();
-
-        // A page is a single lexicographic run over both objects and rolled-up prefixes, so
-        // max-keys bounds the combined result and NextMarker names whichever entry ended the
-        // page. Limiting only the objects would emit oversized pages and, worse, repeat every
-        // prefix on the next page because the marker would skip past them.
-        String basePrefix = prefix != null ? prefix : "";
-        List<String> entryKeys = new ArrayList<>();
-        Map<String, GcsObjectMeta> objectsByKey = new LinkedHashMap<>();
-        Set<String> seenPrefixes = new LinkedHashSet<>();
-        for (GcsObjectMeta meta : all) {
-            if (delimiter != null && !delimiter.isEmpty()) {
-                String rest = meta.getName().substring(basePrefix.length());
-                int idx = rest.indexOf(delimiter);
-                if (idx >= 0) {
-                    String common = basePrefix + rest.substring(0, idx + delimiter.length());
-                    if (seenPrefixes.add(common)) {
-                        entryKeys.add(common);
-                    }
-                    continue;
-                }
-            }
-            objectsByKey.put(meta.getName(), meta);
-            entryKeys.add(meta.getName());
-        }
-        // The marker is compared against the rolled-up entry key, not the raw object name. A
-        // NextMarker naming a common prefix would otherwise never advance: every object under
-        // "d1/" sorts after "d1/", so they would survive the filter and roll up to "d1/" again,
-        // handing the client the same page forever.
-        if (marker != null && !marker.isEmpty()) {
-            String from = marker;
-            entryKeys.removeIf(key -> key.compareTo(from) <= 0);
-        }
-        entryKeys.sort(Comparator.naturalOrder());
-
-        int limit = maxKeys != null && maxKeys > 0 ? maxKeys : entryKeys.size();
-        boolean truncated = entryKeys.size() > limit;
-        List<String> page = truncated ? entryKeys.subList(0, limit) : entryKeys;
-
-        XmlBuilder xml = new XmlBuilder()
-                .start("ListBucketResult", "http://doc.s3.amazonaws.com/2006-03-01")
-                .elem("Name", bucket)
-                .elem("Prefix", basePrefix)
-                .elem("Marker", marker != null ? marker : "")
-                .elem("MaxKeys", limit);
-        if (delimiter != null && !delimiter.isEmpty()) {
-            xml.elem("Delimiter", delimiter);
-        }
-        xml.elem("IsTruncated", truncated);
-        if (truncated && !page.isEmpty()) {
-            // The key a follow-up request passes back as `marker`.
-            xml.elem("NextMarker", page.get(page.size() - 1));
-        }
-        for (String key : page) {
-            GcsObjectMeta meta = objectsByKey.get(key);
-            if (meta == null) {
-                xml.start("CommonPrefixes").elem("Prefix", key).end("CommonPrefixes");
-                continue;
-            }
-            xml.start("Contents")
-                    .elem("Key", meta.getName())
-                    .elem("Generation", meta.getGeneration())
-                    .elem("MetaGeneration", meta.getMetageneration())
-                    .elem("LastModified", meta.getUpdated())
-                    .elem("ETag", GcsMediaResponses.xmlEtag(meta))
-                    .elem("Size", meta.getSize())
-                    .elem("StorageClass", meta.getStorageClass())
-                    .end("Contents");
-        }
-        xml.end("ListBucketResult");
-        return Response.ok(xml.build(), MediaType.APPLICATION_XML).build();
+        GcsBucket stored = service.getBucket(bucket);
+        return GcsXmlObjectListing.respond(stored, service.listObjects(bucket), new GcsXmlObjectListing.Query(
+                prefix, delimiter, maxKeys, marker, listType, startAfter, continuationToken, encodingType));
     }
 
     private static void appendTag(StringBuilder xml, String tag, String value) {
