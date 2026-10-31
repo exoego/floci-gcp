@@ -74,7 +74,8 @@ final class GcsXmlErrorResponse {
             case 412 -> of(412, "PreconditionFailed", "At least one precondition did not hold.");
             case 416 -> of(416, "InvalidRange", "The requested range cannot be satisfied.");
             case 429 -> of(429, "SlowDown", "Please reduce your request rate.");
-            case 501 -> of(400, "NotImplemented", "The requested functionality is not implemented.");
+            case 501 -> of(400, "NotImplemented",
+                    "A header or query you provided requested a function that is not implemented.", error.getMessage(), null);
             case 503 -> of(503, "SlowDown", "The service is temporarily unavailable.");
             default -> internal(error);
         };
