@@ -5,6 +5,7 @@ import io.floci.gcp.core.common.XmlBuilder;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 
 import java.io.ByteArrayOutputStream;
@@ -20,15 +21,25 @@ import java.util.Set;
 
 /**
  * XML API ListObjects: the {@code ListBucketResult} of list-type 1 and list-type 2, in the
- * shapes GCS serves (probed live on 2026-10-30).
+ * shapes GCS serves (probed live on 2026-10-30 and 2026-11-01).
  */
 final class GcsXmlObjectListing {
 
     private static final String NS = "http://doc.s3.amazonaws.com/2006-03-01";
 
-    /** The listing parameters as the client sent them. A missing parameter is null. */
+    /**
+     * The listing parameters as the client sent them. A missing parameter is null, one sent
+     * without a value is an empty string. GCS echoes an empty start-after or continuation-token,
+     * so the two cases must stay apart.
+     */
     record Query(String prefix, String delimiter, String maxKeys, String marker, String listType,
             String startAfter, String continuationToken, String encodingType) {
+
+        static Query of(MultivaluedMap<String, String> params) {
+            return new Query(params.getFirst("prefix"), params.getFirst("delimiter"), params.getFirst("max-keys"),
+                    params.getFirst("marker"), params.getFirst("list-type"), params.getFirst("start-after"),
+                    params.getFirst("continuation-token"), params.getFirst("encoding-type"));
+        }
     }
 
     private GcsXmlObjectListing() {
@@ -36,7 +47,7 @@ final class GcsXmlObjectListing {
 
     static Response respond(GcsBucket bucket, List<GcsObjectMeta> objects, Query query) {
         boolean v2 = "2".equals(query.listType());
-        if (v2 && query.marker() != null) {
+        if (v2 && query.marker() != null && !query.marker().isEmpty()) {
             throw GcpException.unimplemented("GET ?marker is not implemented for listObjectsV2");
         }
         Integer maxKeys = maxKeys(query.maxKeys());
