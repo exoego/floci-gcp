@@ -485,9 +485,11 @@ with any value other than `2`, the result has the version 1 shape: `Name`, `Pref
 when `delimiter` was sent, `IsTruncated`, then every `Contents` entry and then every
 `CommonPrefixes` entry. `list-type=2` replaces `Marker` and `NextMarker` with `StartAfter`,
 `ContinuationToken` and `NextContinuationToken`, and adds `KeyCount`, the number of
-`Contents` entries on the page. A `continuation-token` wins over `start-after`. A `marker`
-sent with `list-type=2` returns HTTP 400 `NotImplemented`. A token the emulator did not issue
-returns HTTP 400 `InvalidArgument`.
+`Contents` entries on the page. A `continuation-token` wins over `start-after`. An empty
+`start-after` or `continuation-token`, with or without `=`, is echoed as an empty element and
+does not move the page. A `marker` with a value sent with `list-type=2` returns HTTP 400
+`NotImplemented`, an empty one is ignored. A token the emulator did not issue returns HTTP 400
+`InvalidArgument`.
 
 A page holds at most `max-keys` entries, objects and common prefixes together, in name
 order. `max-keys=0` returns an empty page that is not truncated. A negative `max-keys` is

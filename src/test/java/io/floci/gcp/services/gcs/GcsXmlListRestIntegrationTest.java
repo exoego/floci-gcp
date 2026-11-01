@@ -121,6 +121,54 @@ class GcsXmlListRestIntegrationTest {
     }
 
     @Test
+    void versionTwoEchoesAnEmptyStartAfterAndAnEmptyToken() {
+        String bucket = newBucket("v2empty");
+        put(bucket, "a.txt", "b.txt", "c.txt");
+        given().queryParam("list-type", 2).queryParam("start-after", "").queryParam("continuation-token", "")
+                .when().get("/" + bucket).then().statusCode(200)
+                .body(containsString("<Prefix></Prefix><StartAfter></StartAfter><ContinuationToken></ContinuationToken>"
+                        + "<KeyCount>3</KeyCount><IsTruncated>false</IsTruncated><Contents><Key>a.txt</Key>"));
+        // An empty token leaves start-after in charge.
+        given().queryParam("list-type", 2).queryParam("continuation-token", "").queryParam("start-after", "a.txt")
+                .when().get("/" + bucket).then().statusCode(200)
+                .body(containsString("<StartAfter>a.txt</StartAfter><ContinuationToken></ContinuationToken>"
+                        + "<KeyCount>2</KeyCount><IsTruncated>false</IsTruncated><Contents><Key>b.txt</Key>"));
+        // A parameter sent without a value counts as sent.
+        given().queryParam("list-type", 2).queryParam("start-after").queryParam("continuation-token")
+                .when().get("/" + bucket).then().statusCode(200)
+                .body(containsString("<Prefix></Prefix><StartAfter></StartAfter><ContinuationToken></ContinuationToken>"
+                        + "<KeyCount>3</KeyCount>"));
+        given().queryParam("marker").when().get("/" + bucket).then().statusCode(200)
+                .body(containsString("<Prefix></Prefix><Marker></Marker><IsTruncated>false</IsTruncated>"));
+        // GCS rejects a marker on list-type=2 only when it has a value.
+        given().queryParam("list-type", 2).queryParam("marker", "").when().get("/" + bucket).then().statusCode(200)
+                .body(containsString("<Prefix></Prefix><KeyCount>3</KeyCount>"))
+                .body(not(containsString("<Marker>")));
+    }
+
+    @Test
+    void otherParametersSentEmptyCountAsNotSent() {
+        String bucket = newBucket("empty");
+        put(bucket, "a.txt", "d1/x.txt");
+        given().queryParam("prefix", "").queryParam("delimiter", "").queryParam("max-keys", "")
+                .queryParam("encoding-type", "").queryParam("list-type", "")
+                .when().get("/" + bucket).then().statusCode(200)
+                .body(containsString(RESULT_START + "<Name>" + bucket + "</Name><Prefix></Prefix><Marker></Marker>"
+                        + "<IsTruncated>false</IsTruncated><Contents><Key>a.txt</Key>"))
+                .body(containsString("<Contents><Key>d1/x.txt</Key>"))
+                .body(not(containsString("<MaxKeys>")))
+                .body(not(containsString("<Delimiter>")))
+                .body(not(containsString("<Encoding-Type>")));
+        given().queryParam("list-type", 2).queryParam("prefix").queryParam("delimiter").queryParam("max-keys")
+                .queryParam("encoding-type")
+                .when().get("/" + bucket).then().statusCode(200)
+                .body(containsString("<Prefix></Prefix><KeyCount>2</KeyCount><IsTruncated>false</IsTruncated>"
+                        + "<Contents><Key>a.txt</Key>"))
+                .body(not(containsString("<MaxKeys>")))
+                .body(not(containsString("<EncodingType>")));
+    }
+
+    @Test
     void versionTwoRejectsAMarkerAndATokenItDidNotIssue() {
         String bucket = newBucket("v2bad");
         given().queryParam("list-type", 2).queryParam("marker", "a.txt")

@@ -148,7 +148,9 @@ public class GcsXmlDownloadController {
 
     /**
      * XML API ListObjects: {@code GET /{bucket}}, answering with {@code ListBucketResult} in
-     * the list-type 1 shape, or the list-type 2 shape when {@code list-type=2} is sent.
+     * the list-type 1 shape, or the list-type 2 shape when {@code list-type=2} is sent. The
+     * parameters are read off {@link UriInfo} because a {@code @QueryParam} sent without a
+     * value arrives as null, and GCS echoes such a parameter as an empty element.
      */
     @GET
     @Produces(MediaType.APPLICATION_XML)
@@ -156,21 +158,13 @@ public class GcsXmlDownloadController {
             @PathParam("bucket") String bucket,
             @Context UriInfo uriInfo,
             @Context HttpHeaders headers,
-            @QueryParam("prefix") String prefix,
-            @QueryParam("delimiter") String delimiter,
-            @QueryParam("max-keys") String maxKeys,
-            @QueryParam("marker") String marker,
-            @QueryParam("list-type") String listType,
-            @QueryParam("start-after") String startAfter,
-            @QueryParam("continuation-token") String continuationToken,
-            @QueryParam("encoding-type") String encodingType,
             @HeaderParam(HttpHeaders.AUTHORIZATION) String authorization) {
         if (GcsXmlMultipartHandler.matches(uriInfo)) { return multipart.handle("GET", bucket, null, uriInfo, headers, null); }
         GcsSignedUrl.checkNotExpired(uriInfo);
-        xmlAuthorization.require(authorization, () -> iamAuthorizationService.requireObjectList(authorization, bucket, prefix));
+        GcsXmlObjectListing.Query query = GcsXmlObjectListing.Query.of(uriInfo.getQueryParameters());
+        xmlAuthorization.require(authorization, () -> iamAuthorizationService.requireObjectList(authorization, bucket, query.prefix()));
         GcsBucket stored = service.getBucket(bucket);
-        return GcsXmlObjectListing.respond(stored, service.listObjects(bucket), new GcsXmlObjectListing.Query(
-                prefix, delimiter, maxKeys, marker, listType, startAfter, continuationToken, encodingType));
+        return GcsXmlObjectListing.respond(stored, service.listObjects(bucket), query);
     }
 
     private static void appendTag(StringBuilder xml, String tag, String value) {
