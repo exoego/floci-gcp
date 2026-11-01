@@ -147,6 +147,28 @@ class GcsXmlListRestIntegrationTest {
     }
 
     @Test
+    void otherParametersSentEmptyCountAsNotSent() {
+        String bucket = newBucket("empty");
+        put(bucket, "a.txt", "d1/x.txt");
+        given().queryParam("prefix", "").queryParam("delimiter", "").queryParam("max-keys", "")
+                .queryParam("encoding-type", "").queryParam("list-type", "")
+                .when().get("/" + bucket).then().statusCode(200)
+                .body(containsString(RESULT_START + "<Name>" + bucket + "</Name><Prefix></Prefix><Marker></Marker>"
+                        + "<IsTruncated>false</IsTruncated><Contents><Key>a.txt</Key>"))
+                .body(containsString("<Contents><Key>d1/x.txt</Key>"))
+                .body(not(containsString("<MaxKeys>")))
+                .body(not(containsString("<Delimiter>")))
+                .body(not(containsString("<Encoding-Type>")));
+        given().queryParam("list-type", 2).queryParam("prefix").queryParam("delimiter").queryParam("max-keys")
+                .queryParam("encoding-type")
+                .when().get("/" + bucket).then().statusCode(200)
+                .body(containsString("<Prefix></Prefix><KeyCount>2</KeyCount><IsTruncated>false</IsTruncated>"
+                        + "<Contents><Key>a.txt</Key>"))
+                .body(not(containsString("<MaxKeys>")))
+                .body(not(containsString("<EncodingType>")));
+    }
+
+    @Test
     void versionTwoRejectsAMarkerAndATokenItDidNotIssue() {
         String bucket = newBucket("v2bad");
         given().queryParam("list-type", 2).queryParam("marker", "a.txt")
